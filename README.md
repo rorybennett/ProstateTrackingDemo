@@ -12,8 +12,9 @@ The app shows two ultrasound image panels:
 ```text
 .
 ├── sidecaster.py
+├── scanner.mtl
 └── libraries/
-    ├── pyclariuscast.pyd # Windows
+    ├── pyclariuscast.*
     ├── cast.dll          # Windows
     ├── libcast.so        # Linux
     └── pyclariuscast.so  # Linux
