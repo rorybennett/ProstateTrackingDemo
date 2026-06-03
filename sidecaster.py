@@ -1,0 +1,339 @@
+#!/usr/bin/env python
+
+import ctypes
+import os
+import sys
+from pathlib import Path
+from typing import Final
+
+APP_DIR = Path(__file__).resolve().parent
+LIB_DIR = APP_DIR / "libraries"
+
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+if sys.platform.startswith("win"):
+    os.add_dll_directory(str(LIB_DIR))
+    ctypes.WinDLL(str(LIB_DIR / "cast.dll"))
+
+elif sys.platform.startswith("linux"):
+    libcast_handle = ctypes.CDLL(str(LIB_DIR / "libcast.so"), ctypes.RTLD_GLOBAL)._handle
+    pyclariuscast = ctypes.cdll.LoadLibrary(str(LIB_DIR / "pyclariuscast.so"))
+
+import pyclariuscast
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Slot
+
+CMD_FREEZE: Final = 1
+CMD_CAPTURE_IMAGE: Final = 2
+CMD_CAPTURE_CINE: Final = 3
+CMD_DEPTH_DEC: Final = 4
+CMD_DEPTH_INC: Final = 5
+CMD_GAIN_DEC: Final = 6
+CMD_GAIN_INC: Final = 7
+CMD_B_MODE: Final = 12
+CMD_CFI_MODE: Final = 14
+
+
+class FreezeEvent(QtCore.QEvent):
+    def __init__(self, frozen):
+        super().__init__(QtCore.QEvent.User)
+        self.frozen = frozen
+
+
+class ButtonEvent(QtCore.QEvent):
+    def __init__(self, btn, clicks):
+        super().__init__(QtCore.QEvent.Type(QtCore.QEvent.User + 1))
+        self.btn = btn
+        self.clicks = clicks
+
+
+class ImageEvent(QtCore.QEvent):
+    def __init__(self):
+        super().__init__(QtCore.QEvent.Type(QtCore.QEvent.User + 2))
+
+
+class Signaller(QtCore.QObject):
+    freeze = QtCore.Signal(bool)
+    button = QtCore.Signal(int, int)
+    image = QtCore.Signal(QtGui.QImage)
+
+    def __init__(self):
+        QtCore.QObject.__init__(self)
+        self.usimage = QtGui.QImage()
+
+    def event(self, evt):
+        if evt.type() == QtCore.QEvent.User:
+            self.freeze.emit(evt.frozen)
+        elif evt.type() == QtCore.QEvent.Type(QtCore.QEvent.User + 1):
+            self.button.emit(evt.btn, evt.clicks)
+        elif evt.type() == QtCore.QEvent.Type(QtCore.QEvent.User + 2):
+            self.image.emit(self.usimage)
+        return True
+
+
+signaller = Signaller()
+
+
+class ImageView(QtWidgets.QGraphicsView):
+    def __init__(self, cast=None, controls_output_size=False):
+        QtWidgets.QGraphicsView.__init__(self)
+        self.cast = cast
+        self.controls_output_size = controls_output_size
+        self.image = QtGui.QImage()
+        self.setScene(QtWidgets.QGraphicsScene())
+        self.setMinimumSize(320, 240)
+
+    def updateImage(self, img):
+        self.image = img
+        self.scene().invalidate()
+        self.viewport().update()
+
+    def saveImage(self, filename):
+        if not self.image.isNull():
+            self.image.save(str(filename))
+
+    def resizeEvent(self, evt):
+        w = evt.size().width()
+        h = evt.size().height()
+        if self.controls_output_size and self.cast is not None:
+            self.cast.setOutputSize(w, h)
+        self.setSceneRect(0, 0, w, h)
+        super().resizeEvent(evt)
+
+    def drawBackground(self, painter, rect):
+        painter.fillRect(rect, QtCore.Qt.black)
+
+    def drawForeground(self, painter, rect):
+        if not self.image.isNull():
+            painter.drawImage(rect, self.image)
+
+
+class MainWidget(QtWidgets.QMainWindow):
+    def __init__(self, cast, parent=None):
+        QtWidgets.QMainWindow.__init__(self, parent)
+        self.cast = cast
+        self.setWindowTitle("Clarius Cast Dual Display Demo")
+
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+
+        ip = QtWidgets.QLineEdit("192.168.1.1")
+        ip.setInputMask("000.000.000.000")
+        port = QtWidgets.QLineEdit("5828")
+        port.setInputMask("00000")
+
+        conn = QtWidgets.QPushButton("Connect")
+        self.run = QtWidgets.QPushButton("Run")
+        quit = QtWidgets.QPushButton("Quit")
+        depthUp = QtWidgets.QPushButton("< Depth")
+        depthDown = QtWidgets.QPushButton("> Depth")
+        gainInc = QtWidgets.QPushButton("> Gain")
+        gainDec = QtWidgets.QPushButton("< Gain")
+        captureImage = QtWidgets.QPushButton("Capture Image")
+        captureCine = QtWidgets.QPushButton("Capture Movie")
+        saveImage = QtWidgets.QPushButton("Save Local")
+        bMode = QtWidgets.QPushButton("B Mode")
+        cfiMode = QtWidgets.QPushButton("Color Mode")
+
+        def tryConnect():
+            if not cast.isConnected():
+                if cast.connect(ip.text(), int(port.text()), "research"):
+                    self.statusBar().showMessage("Connected")
+                    conn.setText("Disconnect")
+                else:
+                    self.statusBar().showMessage(f"Failed to connect to {ip.text()}")
+            elif cast.disconnect():
+                self.statusBar().showMessage("Disconnected")
+                conn.setText("Connect")
+            else:
+                self.statusBar().showMessage("Failed to disconnect")
+
+        def tryFreeze():
+            if cast.isConnected():
+                cast.userFunction(CMD_FREEZE, 0)
+
+        def tryDepthUp():
+            if cast.isConnected():
+                cast.userFunction(CMD_DEPTH_DEC, 0)
+
+        def tryDepthDown():
+            if cast.isConnected():
+                cast.userFunction(CMD_DEPTH_INC, 0)
+
+        def tryGainDec():
+            if cast.isConnected():
+                cast.userFunction(CMD_GAIN_DEC, 0)
+
+        def tryGainInc():
+            if cast.isConnected():
+                cast.userFunction(CMD_GAIN_INC, 0)
+
+        def tryCaptureImage():
+            if cast.isConnected():
+                cast.userFunction(CMD_CAPTURE_IMAGE, 0)
+
+        def tryCaptureCine():
+            if cast.isConnected():
+                cast.userFunction(CMD_CAPTURE_CINE, 0)
+
+        def trySaveImage():
+            self.originalView.saveImage(Path.home() / "Pictures/clarius_original_image.png")
+            self.processedView.saveImage(Path.home() / "Pictures/clarius_processed_image.png")
+            self.statusBar().showMessage("Saved original and processed images")
+
+        def tryBMode():
+            if cast.isConnected():
+                cast.userFunction(CMD_B_MODE, 0)
+
+        def tryCfiMode():
+            if cast.isConnected():
+                cast.userFunction(CMD_CFI_MODE, 0)
+
+        conn.clicked.connect(tryConnect)
+        self.run.clicked.connect(tryFreeze)
+        quit.clicked.connect(self.shutdown)
+        depthUp.clicked.connect(tryDepthUp)
+        depthDown.clicked.connect(tryDepthDown)
+        gainInc.clicked.connect(tryGainInc)
+        gainDec.clicked.connect(tryGainDec)
+        captureImage.clicked.connect(tryCaptureImage)
+        captureCine.clicked.connect(tryCaptureCine)
+        saveImage.clicked.connect(trySaveImage)
+        bMode.clicked.connect(tryBMode)
+        cfiMode.clicked.connect(tryCfiMode)
+
+        self.originalView = ImageView(cast, controls_output_size=True)
+        self.processedView = ImageView()
+
+        originalGroup = QtWidgets.QGroupBox("Original ultrasound image")
+        originalLayout = QtWidgets.QVBoxLayout()
+        originalLayout.addWidget(self.originalView)
+        originalGroup.setLayout(originalLayout)
+
+        processedGroup = QtWidgets.QGroupBox("Processed image")
+        processedLayout = QtWidgets.QVBoxLayout()
+        processedLayout.addWidget(self.processedView)
+        processedGroup.setLayout(processedLayout)
+
+        displayLayout = QtWidgets.QHBoxLayout()
+        displayLayout.addWidget(originalGroup)
+        displayLayout.addWidget(processedGroup)
+
+        layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(displayLayout)
+
+        inplayout = QtWidgets.QHBoxLayout()
+        layout.addLayout(inplayout)
+        inplayout.addWidget(ip)
+        inplayout.addWidget(port)
+
+        connlayout = QtWidgets.QHBoxLayout()
+        layout.addLayout(connlayout)
+        connlayout.addWidget(conn)
+        connlayout.addWidget(self.run)
+        connlayout.addWidget(quit)
+        central.setLayout(layout)
+
+        prmlayout = QtWidgets.QHBoxLayout()
+        layout.addLayout(prmlayout)
+        prmlayout.addWidget(depthUp)
+        prmlayout.addWidget(depthDown)
+        prmlayout.addWidget(gainDec)
+        prmlayout.addWidget(gainInc)
+
+        caplayout = QtWidgets.QHBoxLayout()
+        layout.addLayout(caplayout)
+        caplayout.addWidget(captureImage)
+        caplayout.addWidget(captureCine)
+        caplayout.addWidget(saveImage)
+
+        modelayout = QtWidgets.QHBoxLayout()
+        layout.addLayout(modelayout)
+        modelayout.addWidget(bMode)
+        modelayout.addWidget(cfiMode)
+
+        signaller.freeze.connect(self.freeze)
+        signaller.button.connect(self.button)
+        signaller.image.connect(self.image)
+
+        path = os.path.expanduser("~/")
+        if cast.init(path, 640, 480):
+            self.statusBar().showMessage("Initialized")
+        else:
+            self.statusBar().showMessage("Failed to initialize")
+
+    def processImageForDisplay(self, original_img):
+        return original_img.copy()
+
+    @Slot(bool)
+    def freeze(self, frozen):
+        if frozen:
+            self.run.setText("Run")
+            self.statusBar().showMessage("Image Stopped")
+        else:
+            self.run.setText("Freeze")
+            self.statusBar().showMessage("Image Running (check firewall settings if no image seen)")
+
+    @Slot(int, int)
+    def button(self, btn, clicks):
+        self.statusBar().showMessage(f"Button {btn} pressed w/ {clicks} clicks")
+
+    @Slot(QtGui.QImage)
+    def image(self, img):
+        self.originalView.updateImage(img)
+        self.processedView.updateImage(self.processImageForDisplay(img))
+
+    @Slot()
+    def shutdown(self):
+        if sys.platform.startswith("linux"):
+            ctypes.CDLL("libc.so.6").dlclose(libcast_handle)
+
+        self.cast.destroy()
+        QtWidgets.QApplication.quit()
+
+
+# called when a new processed image is streamed
+# this is the displayable scan-converted ultrasound image
+def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angle, imu):
+    bpp = sz / (width * height)
+    if bpp == 4:
+        img = QtGui.QImage(image, width, height, QtGui.QImage.Format_ARGB32)
+    else:
+        img = QtGui.QImage(image, width, height, QtGui.QImage.Format_Grayscale8)
+    signaller.usimage = img.copy()
+    QtCore.QCoreApplication.postEvent(signaller, ImageEvent())
+
+
+# called when a new raw pre scan-converted image is streamed
+def newRawImage(image, lines, samples, bps, axial, lateral, timestamp, jpg, rf, angle):
+    return
+
+
+def newSpectrumImage(image, lines, samples, bps, period, micronsPerSample, velocityPerSample, pw):
+    return
+
+
+def newImuData(imu):
+    return
+
+
+def freezeFn(frozen):
+    QtCore.QCoreApplication.postEvent(signaller, FreezeEvent(frozen))
+
+
+def buttonsFn(button, clicks):
+    QtCore.QCoreApplication.postEvent(signaller, ButtonEvent(button, clicks))
+
+
+def main():
+    cast = pyclariuscast.Caster(newProcessedImage, newRawImage, newSpectrumImage, newImuData, freezeFn, buttonsFn)
+    app = QtWidgets.QApplication(sys.argv)
+    widget = MainWidget(cast)
+    widget.resize(1200, 600)
+    widget.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
