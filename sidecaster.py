@@ -13,6 +13,7 @@ SRC_DIR = APP_DIR / "src"
 LEFT_ARROW_ICON_PATH = SRC_DIR / "move_left.png"
 RIGHT_ARROW_ICON_PATH = SRC_DIR / "move_right.png"
 OK_ICON_PATH = SRC_DIR / "correct.png"
+NO_DETECTION_ICON_PATH = SRC_DIR / "no_detection.png"
 PY_TAG = f"python{sys.version_info.major}{sys.version_info.minor}"
 PY_LIB_DIR = LIB_DIR / PY_TAG
 LIB_SEARCH_DIRS = [PY_LIB_DIR, LIB_DIR]
@@ -62,7 +63,7 @@ CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
-CENTRE_TOLERANCE_FRACTION: Final = 0.4
+CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
 MEASUREMENT_BUTTONS: Final = {3: ("RL", "Calculate RL"), 4: ("AP", "Calculate AP"), 5: ("SI", "Calculate SI")}
@@ -369,7 +370,7 @@ class MainWidget(QtWidgets.QMainWindow):
             return None
 
     def loadGuidanceIcons(self):
-        paths = {"left": LEFT_ARROW_ICON_PATH, "right": RIGHT_ARROW_ICON_PATH, "ok": OK_ICON_PATH}
+        paths = {"left": LEFT_ARROW_ICON_PATH, "right": RIGHT_ARROW_ICON_PATH, "ok": OK_ICON_PATH, "no_detection": NO_DETECTION_ICON_PATH}
         icons = {}
         for key, path in paths.items():
             icon = QtGui.QPixmap(str(path))
@@ -421,8 +422,34 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.drawText(QtCore.QRectF(x, y, icon_size, icon_size), QtCore.Qt.AlignCenter, fallback_text)
 
 
-    def drawMeasurementLine(self, painter, start, end, text, text_offset):
-        line_pen = QtGui.QPen(QtCore.Qt.yellow)
+    def clampPoint(self, painter, x, y, margin=6):
+        device = painter.device()
+        width = device.width() if device is not None else 0
+        height = device.height() if device is not None else 0
+        x = min(max(float(x), margin), max(margin, width - margin))
+        y = min(max(float(y), margin + 14), max(margin + 14, height - margin))
+        return QtCore.QPointF(x, y)
+
+    def drawNoDetectionIcon(self, painter, output_img):
+        icon = self.guidance_icons.get("no_detection")
+        icon_size = max(48, int(output_img.width() * GUIDANCE_ICON_SIZE_FRACTION))
+        x = (output_img.width() - icon_size) // 2
+        y = output_img.height() - icon_size - GUIDANCE_ICON_MARGIN
+
+        if icon is not None:
+            scaled_icon = icon.scaled(icon_size, icon_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            painter.drawPixmap(x + (icon_size - scaled_icon.width()) // 2, y + (icon_size - scaled_icon.height()) // 2, scaled_icon)
+            return
+
+        font = QtGui.QFont()
+        font.setBold(True)
+        font.setPointSize(max(14, icon_size // 5))
+        painter.setFont(font)
+        painter.setPen(QtGui.QPen(QtCore.Qt.white))
+        painter.drawText(QtCore.QRectF(x, y, icon_size, icon_size), QtCore.Qt.AlignCenter, "NO DETECTION")
+
+    def drawMeasurementLine(self, painter, start, end, text, text_pos, colour):
+        line_pen = QtGui.QPen(colour)
         line_pen.setWidth(3)
         painter.setPen(line_pen)
         painter.drawLine(QtCore.QPointF(*start), QtCore.QPointF(*end))
@@ -432,16 +459,16 @@ class MainWidget(QtWidgets.QMainWindow):
         font.setPointSize(14)
         painter.setFont(font)
 
-        text_x = (start[0] + end[0]) / 2 + text_offset[0]
-        text_y = (start[1] + end[1]) / 2 + text_offset[1]
+        text_point = self.clampPoint(painter, *text_pos)
         painter.setPen(QtGui.QPen(QtCore.Qt.black))
-        painter.drawText(QtCore.QPointF(text_x + 1, text_y + 1), text)
-        painter.setPen(QtGui.QPen(QtCore.Qt.yellow))
-        painter.drawText(QtCore.QPointF(text_x, text_y), text)
+        painter.drawText(text_point + QtCore.QPointF(1, 1), text)
+        painter.setPen(QtGui.QPen(colour))
+        painter.drawText(text_point, text)
 
     def drawYoloMeasurements(self, painter, x1, y1, x2, y2, microns_per_pixel):
         if microns_per_pixel <= 0:
-            painter.drawText(QtCore.QPointF(x1 + 4, y2 + 22), "Scale unavailable")
+            painter.setPen(QtGui.QPen(QtCore.Qt.white))
+            painter.drawText(self.clampPoint(painter, x1 + 4, y2 + 22), "Scale unavailable")
             return
 
         scale_mm = microns_per_pixel / 1000.0
@@ -454,11 +481,11 @@ class MainWidget(QtWidgets.QMainWindow):
         centre_y = (y1 + y2) / 2
 
         if self.measurements_enabled["RL"]:
-            self.drawMeasurementLine(painter, (x1, centre_y), (x2, centre_y), f"RL {width_mm:.1f} mm", (4, -8))
+            self.drawMeasurementLine(painter, (x1, centre_y), (x2, centre_y), f"RL {width_mm:.1f} mm", (x1 - 110, centre_y + 5), QtCore.Qt.blue)
         if self.measurements_enabled["AP"]:
-            self.drawMeasurementLine(painter, (centre_x, y1), (centre_x, y2), f"AP {height_mm:.1f} mm", (8, 4))
+            self.drawMeasurementLine(painter, (centre_x, y1), (centre_x, y2), f"AP {height_mm:.1f} mm", (centre_x - 45, y2 + 24), QtCore.Qt.red)
         if self.measurements_enabled["SI"]:
-            self.drawMeasurementLine(painter, (x1, y1), (x2, y2), f"SI {hypotenuse_mm:.1f} mm", (8, -8))
+            self.drawMeasurementLine(painter, (x1, y1), (x2, y2), f"SI {hypotenuse_mm:.1f} mm", (x1 + 4, y1 - 10), QtCore.Qt.green)
 
     def processImageForDisplay(self, original_img, microns_per_pixel):
         output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
@@ -473,6 +500,9 @@ class MainWidget(QtWidgets.QMainWindow):
             return output_img
 
         if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+            painter = QtGui.QPainter(output_img)
+            self.drawNoDetectionIcon(painter, output_img)
+            painter.end()
             return output_img
 
         boxes = results[0].boxes
