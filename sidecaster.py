@@ -19,6 +19,8 @@ LIB_SEARCH_DIRS = [PY_LIB_DIR, LIB_DIR]
 
 dll_dir_handles = []
 libcast_handle = None
+SHUTTING_DOWN = False
+
 
 
 def find_lib(filename):
@@ -94,6 +96,8 @@ class Signaller(QtCore.QObject):
         self.usimage = QtGui.QImage()
 
     def event(self, evt):
+        if SHUTTING_DOWN:
+            return True
         if evt.type() == QtCore.QEvent.User:
             self.freeze.emit(evt.frozen)
         elif evt.type() == QtCore.QEvent.Type(QtCore.QEvent.User + 1):
@@ -127,7 +131,7 @@ class ImageView(QtWidgets.QGraphicsView):
     def resizeEvent(self, evt):
         w = evt.size().width()
         h = evt.size().height()
-        if self.controls_output_size and self.cast is not None:
+        if self.controls_output_size and self.cast is not None and not SHUTTING_DOWN:
             self.cast.setOutputSize(w, h)
         self.setSceneRect(0, 0, w, h)
         super().resizeEvent(evt)
@@ -146,6 +150,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.cast = cast
         self.yolo_model = None
         self.guidance_icons = {}
+        self.is_shutting_down = False
         self.setWindowTitle("Clarius Cast Dual Display Demo")
 
         central = QtWidgets.QWidget()
@@ -225,7 +230,7 @@ class MainWidget(QtWidgets.QMainWindow):
 
         conn.clicked.connect(tryConnect)
         self.run.clicked.connect(tryFreeze)
-        quit.clicked.connect(self.shutdown)
+        quit.clicked.connect(self.close)
         depthUp.clicked.connect(tryDepthUp)
         depthDown.clicked.connect(tryDepthDown)
         gainInc.clicked.connect(tryGainInc)
@@ -415,28 +420,69 @@ class MainWidget(QtWidgets.QMainWindow):
 
     @Slot(QtGui.QImage)
     def image(self, img):
+        if self.is_shutting_down:
+            return
         self.originalView.updateImage(img)
         self.processedView.updateImage(self.processImageForDisplay(img))
 
+    def closeEvent(self, evt):
+        self.shutdown()
+        evt.accept()
+
     @Slot()
     def shutdown(self):
-        if sys.platform.startswith("linux") and libcast_handle is not None:
-            ctypes.CDLL("libc.so.6").dlclose(libcast_handle)
+        global SHUTTING_DOWN, libcast_handle
+        if self.is_shutting_down:
+            return
 
-        self.cast.destroy()
+        self.is_shutting_down = True
+        SHUTTING_DOWN = True
+
+        try:
+            signaller.freeze.disconnect(self.freeze)
+            signaller.button.disconnect(self.button)
+            signaller.image.disconnect(self.image)
+        except (RuntimeError, TypeError):
+            pass
+
+        try:
+            if self.cast is not None and self.cast.isConnected():
+                self.cast.disconnect()
+        except Exception as exc:
+            print(f"Cast disconnect failed: {exc}", file=sys.stderr)
+
+        try:
+            if self.cast is not None:
+                self.cast.destroy()
+        except Exception as exc:
+            print(f"Cast destroy failed: {exc}", file=sys.stderr)
+
+        self.cast = None
+
+        if sys.platform.startswith("linux") and libcast_handle is not None:
+            try:
+                ctypes.CDLL("libc.so.6").dlclose(libcast_handle)
+                libcast_handle = None
+            except Exception as exc:
+                print(f"libcast unload failed: {exc}", file=sys.stderr)
+
         QtWidgets.QApplication.quit()
 
 
 # called when a new processed image is streamed
 # this is the displayable scan-converted ultrasound image
 def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angle, imu):
+    if SHUTTING_DOWN:
+        return
     bpp = sz / (width * height)
     if bpp == 4:
         img = QtGui.QImage(image, width, height, QtGui.QImage.Format_ARGB32)
     else:
         img = QtGui.QImage(image, width, height, QtGui.QImage.Format_Grayscale8)
-    signaller.usimage = img.copy()
-    QtCore.QCoreApplication.postEvent(signaller, ImageEvent())
+    app = QtCore.QCoreApplication.instance()
+    if app is not None and not app.closingDown():
+        signaller.usimage = img.copy()
+        QtCore.QCoreApplication.postEvent(signaller, ImageEvent())
 
 
 # called when a new raw pre scan-converted image is streamed
@@ -453,11 +499,15 @@ def newImuData(imu):
 
 
 def freezeFn(frozen):
-    QtCore.QCoreApplication.postEvent(signaller, FreezeEvent(frozen))
+    app = QtCore.QCoreApplication.instance()
+    if not SHUTTING_DOWN and app is not None and not app.closingDown():
+        QtCore.QCoreApplication.postEvent(signaller, FreezeEvent(frozen))
 
 
 def buttonsFn(button, clicks):
-    QtCore.QCoreApplication.postEvent(signaller, ButtonEvent(button, clicks))
+    app = QtCore.QCoreApplication.instance()
+    if not SHUTTING_DOWN and app is not None and not app.closingDown():
+        QtCore.QCoreApplication.postEvent(signaller, ButtonEvent(button, clicks))
 
 
 def main():
