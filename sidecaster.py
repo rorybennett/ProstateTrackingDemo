@@ -341,12 +341,20 @@ class MainWidget(QtWidgets.QMainWindow):
     def drawGuidanceIcon(self, painter, output_img, guidance_state):
         icon = self.guidance_icons.get(guidance_state)
         icon_size = max(48, int(output_img.width() * GUIDANCE_ICON_SIZE_FRACTION))
-        x = output_img.width() - icon_size - GUIDANCE_ICON_MARGIN
-        y = GUIDANCE_ICON_MARGIN
+        y = output_img.height() - icon_size - GUIDANCE_ICON_MARGIN
+
+        if guidance_state == "right":
+            x = GUIDANCE_ICON_MARGIN
+        elif guidance_state == "left":
+            x = output_img.width() - icon_size - GUIDANCE_ICON_MARGIN
+        else:
+            x = (output_img.width() - icon_size) // 2
 
         if icon is not None:
             scaled_icon = icon.scaled(icon_size, icon_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            painter.drawPixmap(x, y, scaled_icon)
+            draw_x = x + (icon_size - scaled_icon.width()) // 2
+            draw_y = y + (icon_size - scaled_icon.height()) // 2
+            painter.drawPixmap(draw_x, draw_y, scaled_icon)
             return
 
         fallback_text = {"left": "←", "right": "→", "ok": "OK"}[guidance_state]
