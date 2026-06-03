@@ -481,11 +481,11 @@ class MainWidget(QtWidgets.QMainWindow):
         centre_y = (y1 + y2) / 2
 
         if self.measurements_enabled["RL"]:
-            self.drawMeasurementLine(painter, (x1, centre_y), (x2, centre_y), f"RL {width_mm:.1f} mm", (x1 - 110, centre_y + 5), QtCore.Qt.blue)
+            self.drawMeasurementLine(painter, (x1, centre_y), (x2, centre_y), f"RL {width_mm:.1f} mm", (x1 - 110, centre_y + 5), QtGui.QColor("dodgerblue"))
         if self.measurements_enabled["AP"]:
             self.drawMeasurementLine(painter, (centre_x, y1), (centre_x, y2), f"AP {height_mm:.1f} mm", (centre_x - 45, y2 + 24), QtCore.Qt.red)
         if self.measurements_enabled["SI"]:
-            self.drawMeasurementLine(painter, (x1, y1), (x2, y2), f"SI {hypotenuse_mm:.1f} mm", (x1 + 4, y1 - 10), QtCore.Qt.green)
+            self.drawMeasurementLine(painter, (x1, y1), (x2, y2), f"SI {hypotenuse_mm:.1f} mm", (x2 + 8, y2 + 22), QtCore.Qt.green)
 
     def processImageForDisplay(self, original_img, microns_per_pixel):
         output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
@@ -519,7 +519,17 @@ class MainWidget(QtWidgets.QMainWindow):
         cls_id = int(boxes.cls[best_idx].item()) if boxes.cls is not None else None
         label = f"{self.yolo_model.names.get(cls_id, cls_id)} {conf:.2f}" if cls_id is not None else f"{conf:.2f}"
         painter.drawRect(QtCore.QRectF(best_x1, best_y1, best_x2 - best_x1, best_y2 - best_y1))
-        painter.drawText(QtCore.QPointF(best_x1 + 4, max(16, best_y1 - 6)), label)
+
+        label_font = QtGui.QFont()
+        label_font.setBold(True)
+        label_font.setPointSize(18)
+        painter.setFont(label_font)
+        label_pos = QtCore.QPointF(best_x1 + 4, max(22, best_y1 - 8))
+        painter.setPen(QtGui.QPen(QtCore.Qt.black))
+        painter.drawText(label_pos + QtCore.QPointF(2, 2), label)
+        painter.setPen(pen)
+        painter.drawText(label_pos, label)
+
         self.drawYoloMeasurements(painter, best_x1, best_y1, best_x2, best_y2, microns_per_pixel)
 
         self.drawGuidanceIcon(painter, output_img, guidance_state)
