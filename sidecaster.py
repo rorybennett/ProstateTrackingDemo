@@ -22,7 +22,6 @@ libcast_handle = None
 SHUTTING_DOWN = False
 
 
-
 def find_lib(filename):
     for lib_dir in LIB_SEARCH_DIRS:
         path = lib_dir / filename
@@ -63,7 +62,7 @@ CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
-CENTRE_TOLERANCE_FRACTION: Final = 0.12
+CENTRE_TOLERANCE_FRACTION: Final = 0.08
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
 
@@ -149,6 +148,7 @@ class MainWidget(QtWidgets.QMainWindow):
         QtWidgets.QMainWindow.__init__(self, parent)
         self.cast = cast
         self.yolo_model = None
+        self.yolo_enabled = True
         self.guidance_icons = {}
         self.is_shutting_down = False
         self.setWindowTitle("Clarius Cast Dual Display Demo")
@@ -228,6 +228,17 @@ class MainWidget(QtWidgets.QMainWindow):
             if cast.isConnected():
                 cast.userFunction(CMD_CFI_MODE, 0)
 
+        def tryToggleYolo(checked):
+            self.yolo_enabled = checked
+            self.yoloToggleButton.setText("YOLO: On" if checked else "YOLO: Off")
+            if checked and self.yolo_model is None:
+                self.statusBar().showMessage("YOLO enabled, but model is not loaded")
+            else:
+                self.statusBar().showMessage(f"YOLO detection {'enabled' if checked else 'disabled'}")
+
+        def tryToolButton(index):
+            self.statusBar().showMessage(f"Tool button {index} pressed")
+
         conn.clicked.connect(tryConnect)
         self.run.clicked.connect(tryFreeze)
         quit.clicked.connect(self.close)
@@ -241,6 +252,17 @@ class MainWidget(QtWidgets.QMainWindow):
         bMode.clicked.connect(tryBMode)
         cfiMode.clicked.connect(tryCfiMode)
 
+        self.yoloToggleButton = QtWidgets.QPushButton("YOLO: On")
+        self.yoloToggleButton.setCheckable(True)
+        self.yoloToggleButton.setChecked(self.yolo_enabled)
+        self.yoloToggleButton.clicked.connect(tryToggleYolo)
+
+        self.toolButtons = [self.yoloToggleButton]
+        for index in range(2, 6):
+            button = QtWidgets.QPushButton(f"Button {index}")
+            button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx))
+            self.toolButtons.append(button)
+
         self.originalView = ImageView(cast, controls_output_size=True)
         self.processedView = ImageView()
 
@@ -250,8 +272,14 @@ class MainWidget(QtWidgets.QMainWindow):
         originalGroup.setLayout(originalLayout)
 
         processedGroup = QtWidgets.QGroupBox("Processed image")
-        processedLayout = QtWidgets.QVBoxLayout()
-        processedLayout.addWidget(self.processedView)
+        processedLayout = QtWidgets.QHBoxLayout()
+        processedButtonLayout = QtWidgets.QVBoxLayout()
+        processedLayout.addWidget(self.processedView, 1)
+        for button in self.toolButtons:
+            button.setMinimumWidth(100)
+            processedButtonLayout.addWidget(button)
+        processedButtonLayout.addStretch(1)
+        processedLayout.addLayout(processedButtonLayout)
         processedGroup.setLayout(processedLayout)
 
         displayLayout = QtWidgets.QHBoxLayout()
@@ -371,7 +399,7 @@ class MainWidget(QtWidgets.QMainWindow):
 
     def processImageForDisplay(self, original_img):
         output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
-        if self.yolo_model is None or original_img.isNull():
+        if original_img.isNull() or not self.yolo_enabled or self.yolo_model is None:
             return output_img
 
         try:
@@ -386,20 +414,22 @@ class MainWidget(QtWidgets.QMainWindow):
 
         boxes = results[0].boxes
         best_idx = int(boxes.conf.argmax().item())
-        x1, y1, x2, y2 = boxes.xyxy[best_idx].tolist()
-        conf = float(boxes.conf[best_idx].item())
-        cls_id = int(boxes.cls[best_idx].item()) if boxes.cls is not None else None
-        label = f"{self.yolo_model.names.get(cls_id, cls_id)} {conf:.2f}" if cls_id is not None else f"{conf:.2f}"
-
-        box_centre_x = (x1 + x2) / 2
-        guidance_state = self.getGuidanceState(box_centre_x, output_img.width())
+        best_x1, _, best_x2, _ = boxes.xyxy[best_idx].tolist()
+        guidance_state = self.getGuidanceState((best_x1 + best_x2) / 2, output_img.width())
 
         painter = QtGui.QPainter(output_img)
         pen = QtGui.QPen(QtCore.Qt.green)
         pen.setWidth(3)
         painter.setPen(pen)
-        painter.drawRect(QtCore.QRectF(x1, y1, x2 - x1, y2 - y1))
-        painter.drawText(QtCore.QPointF(x1 + 4, max(16, y1 - 6)), label)
+
+        for index in range(len(boxes)):
+            x1, y1, x2, y2 = boxes.xyxy[index].tolist()
+            conf = float(boxes.conf[index].item())
+            cls_id = int(boxes.cls[index].item()) if boxes.cls is not None else None
+            label = f"{self.yolo_model.names.get(cls_id, cls_id)} {conf:.2f}" if cls_id is not None else f"{conf:.2f}"
+            painter.drawRect(QtCore.QRectF(x1, y1, x2 - x1, y2 - y1))
+            painter.drawText(QtCore.QPointF(x1 + 4, max(16, y1 - 6)), label)
+
         self.drawGuidanceIcon(painter, output_img, guidance_state)
         painter.end()
 
