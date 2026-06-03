@@ -818,9 +818,18 @@ class MainWidget(QtWidgets.QMainWindow):
         if original_img.isNull():
             return original_img
         percent = min(max(int(self.roi_percent), ROI_MIN_PERCENT), ROI_MAX_PERCENT)
-        roi_width = max(1, int(round(original_img.width() * percent / 100.0)))
-        x = max(0, (original_img.width() - roi_width) // 2)
-        return original_img.copy(x, 0, roi_width, original_img.height())
+        width = original_img.width()
+        height = original_img.height()
+        roi_width = max(1, int(round(width * percent / 100.0)))
+        x = max(0, (width - roi_width) // 2)
+        roi_img = original_img.copy(x, 0, roi_width, height)
+        padded_img = QtGui.QImage(width, height, QtGui.QImage.Format_ARGB32)
+        padded_img.fill(QtCore.Qt.black)
+
+        painter = QtGui.QPainter(padded_img)
+        painter.drawImage(x, 0, roi_img)
+        painter.end()
+        return padded_img
 
     def processImageForDisplay(self, original_img, microns_per_pixel):
         roi_img = self.getRoiImage(original_img)
