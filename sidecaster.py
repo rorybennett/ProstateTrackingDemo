@@ -68,7 +68,11 @@ load_platform_libraries()
 import numpy as np
 import pyclariuscast
 from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.Qt3DCore import Qt3DCore
+from PySide6.Qt3DExtras import Qt3DExtras
+from PySide6.Qt3DRender import Qt3DRender
 from PySide6.QtCore import Slot
+from PySide6.QtGui import QQuaternion, QVector3D
 from ultralytics import YOLO
 
 try:
@@ -104,6 +108,7 @@ UNET_LOGIT_THRESHOLD_SCALE: Final = 100
 UNET_TRAIN_MEAN: Final = 0.07007993166086769
 UNET_TRAIN_STD: Final = 0.15056420456784336
 UNET_MASK_ALPHA: Final = 90
+MAX_BOUNDARY_POINTS: Final = 6000
 
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
@@ -145,7 +150,7 @@ class ImageEvent(QtCore.QEvent):
 class Signaller(QtCore.QObject):
     freeze = QtCore.Signal(bool)
     button = QtCore.Signal(int, int)
-    image = QtCore.Signal(QtGui.QImage, float, int, int)
+    image = QtCore.Signal(QtGui.QImage, float, int, int, float, float, float, float, bool)
 
     def __init__(self):
         super().__init__()
@@ -153,6 +158,11 @@ class Signaller(QtCore.QObject):
         self.microns_per_pixel = 0.0
         self.scan_width = 0
         self.scan_height = 0
+        self.qw = 1.0
+        self.qx = 0.0
+        self.qy = 0.0
+        self.qz = 0.0
+        self.has_imu_data = False
 
     def event(self, evt):
         if SHUTTING_DOWN:
@@ -166,13 +176,97 @@ class Signaller(QtCore.QObject):
             self.button.emit(evt.button, evt.clicks)
             return True
         if event_type == IMAGE_EVENT_TYPE:
-            self.image.emit(self.usimage, self.microns_per_pixel, self.scan_width, self.scan_height)
+            self.image.emit(self.usimage, self.microns_per_pixel, self.scan_width, self.scan_height, self.qw, self.qx, self.qy, self.qz, self.has_imu_data)
             return True
 
         return super().event(evt)
 
 
 signaller = Signaller()
+
+
+
+class BoundaryWindow(QtWidgets.QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlag(QtCore.Qt.Window, True)
+        self.cloud_entity = None
+        self.view = Qt3DExtras.Qt3DWindow()
+        self.container = QtWidgets.QWidget.createWindowContainer(self.view)
+        self.root_entity = Qt3DCore.QEntity()
+        self.view.setRootEntity(self.root_entity)
+        self.setCentralWidget(self.container)
+        self.setWindowTitle("Recorded Boundary")
+        self.setupScene()
+
+    def setupScene(self):
+        camera = self.view.camera()
+        camera.lens().setPerspectiveProjection(45, 16 / 9, 0.1, 10000)
+        camera.setPosition(QVector3D(0, -120, 80))
+        camera.setViewCenter(QVector3D(0, 0, 0))
+
+        controller = Qt3DExtras.QOrbitCameraController(self.root_entity)
+        controller.setLinearSpeed(80)
+        controller.setLookSpeed(180)
+        controller.setCamera(camera)
+
+        light_entity = Qt3DCore.QEntity(self.root_entity)
+        light = Qt3DRender.QPointLight(light_entity)
+        light.setIntensity(1.0)
+        light_transform = Qt3DCore.QTransform()
+        light_transform.setTranslation(QVector3D(0, -80, 120))
+        light_entity.addComponent(light)
+        light_entity.addComponent(light_transform)
+
+    def setPoints(self, points):
+        points = np.asarray(points, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 3 or points.size == 0:
+            return
+
+        if self.cloud_entity is not None:
+            self.cloud_entity.setEnabled(False)
+            self.cloud_entity.deleteLater()
+
+        self.cloud_entity = self.createPointCloudEntity(points)
+        self.fitCamera(points)
+        self.setWindowTitle(f"Recorded Boundary - {len(points)} points")
+
+    def createPointCloudEntity(self, points):
+        entity = Qt3DCore.QEntity(self.root_entity)
+        geometry = Qt3DCore.QGeometry(entity)
+        vertex_buffer = Qt3DCore.QBuffer(geometry)
+        vertex_buffer.setData(QtCore.QByteArray(points.tobytes()))
+
+        position_attribute = Qt3DCore.QAttribute(geometry)
+        position_attribute.setName(Qt3DCore.QAttribute.defaultPositionAttributeName())
+        position_attribute.setVertexBaseType(Qt3DCore.QAttribute.Float)
+        position_attribute.setVertexSize(3)
+        position_attribute.setAttributeType(Qt3DCore.QAttribute.VertexAttribute)
+        position_attribute.setBuffer(vertex_buffer)
+        position_attribute.setByteStride(3 * 4)
+        position_attribute.setCount(points.shape[0])
+        geometry.addAttribute(position_attribute)
+
+        renderer = Qt3DRender.QGeometryRenderer(entity)
+        renderer.setGeometry(geometry)
+        renderer.setPrimitiveType(Qt3DRender.QGeometryRenderer.Points)
+        renderer.setVertexCount(points.shape[0])
+
+        material = Qt3DExtras.QPhongMaterial(entity)
+        material.setDiffuse(QtGui.QColor("orange"))
+        material.setAmbient(QtGui.QColor("orange"))
+
+        entity.addComponent(renderer)
+        entity.addComponent(material)
+        return entity
+
+    def fitCamera(self, points):
+        centre = points.mean(axis=0)
+        spread = float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
+        distance = max(80.0, spread * 1.8)
+        camera = self.view.camera()
+        camera.setViewCenter(QVector3D(float(centre[0]), float(centre[1]), float(centre[2])))
+        camera.setPosition(QVector3D(float(centre[0]), float(centre[1] - distance), float(centre[2] + distance * 0.6)))
 
 
 class ImageView(QtWidgets.QGraphicsView):
@@ -234,7 +328,10 @@ class MainWidget(QtWidgets.QMainWindow):
         self.latest_scan_height = 0
         self.latest_microns_per_pixel = 0.0
         self.latest_image = QtGui.QImage()
+        self.latest_orientation = (1.0, 0.0, 0.0, 0.0)
+        self.latest_has_imu_data = False
 
+        self.boundaryWindow = None
         self.roi_percent = ROI_DEFAULT_PERCENT
         self.is_shutting_down = False
 
@@ -309,6 +406,9 @@ class MainWidget(QtWidgets.QMainWindow):
         self.unetThresholdSlider.setTickPosition(QtWidgets.QSlider.TicksBelow)
         self.unetThresholdSlider.setMinimumWidth(180)
 
+        self.recordBoundariesButton = QtWidgets.QPushButton("Record Boundaries")
+        self.recordBoundariesButton.setMinimumWidth(180)
+
     def buildMainLayout(self):
         layout = QtWidgets.QVBoxLayout()
         layout.addLayout(self.buildDisplayLayout())
@@ -346,6 +446,7 @@ class MainWidget(QtWidgets.QMainWindow):
         button_layout.addWidget(self.roiSlider)
         button_layout.addWidget(self.unetThresholdLabel)
         button_layout.addWidget(self.unetThresholdSlider)
+        button_layout.addWidget(self.recordBoundariesButton)
         button_layout.addStretch(1)
         layout.addLayout(button_layout)
         group.setLayout(layout)
@@ -402,6 +503,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.unetToggleButton.clicked.connect(self.tryToggleUnet)
         self.roiSlider.valueChanged.connect(self.tryRoiChanged)
         self.unetThresholdSlider.valueChanged.connect(self.tryUnetThresholdChanged)
+        self.recordBoundariesButton.clicked.connect(self.tryRecordBoundaries)
 
         signaller.freeze.connect(self.freeze)
         signaller.button.connect(self.button)
@@ -522,6 +624,120 @@ class MainWidget(QtWidgets.QMainWindow):
     def refreshProcessedImage(self):
         if not self.latest_image.isNull():
             self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
+
+    def tryRecordBoundaries(self):
+        if self.unet_model is None:
+            self.statusBar().showMessage("UNet model is not loaded")
+            return
+        if self.latest_image.isNull():
+            self.statusBar().showMessage("No image available to record")
+            return
+        if not self.latest_has_imu_data:
+            self.statusBar().showMessage("No IMU orientation available for the latest frame")
+            return
+        if self.latest_microns_per_pixel <= 0:
+            self.statusBar().showMessage("Scale unavailable, cannot create 3D boundary")
+            return
+
+        try:
+            roi_img = self.getRoiImage(self.latest_image)
+            mask = self.runUnetMask(roi_img)
+            boundary_pixels = self.getLargestMaskBoundaryPoints(mask)
+            if boundary_pixels.size == 0:
+                self.statusBar().showMessage("UNet found no mask boundary to record")
+                return
+
+            local_points = self.boundaryPixelsToLocalPoints(boundary_pixels, roi_img.width(), roi_img.height(), self.latest_microns_per_pixel)
+            points_3d = self.rotateBoundaryPoints(local_points, self.latest_orientation)
+            self.showBoundaryWindow(points_3d)
+            self.statusBar().showMessage(f"Recorded {len(points_3d)} boundary points")
+        except Exception as exc:
+            self.statusBar().showMessage(f"Boundary recording failed: {exc}")
+
+    def getLargestMaskBoundaryPoints(self, mask):
+        component = self.getLargestMaskComponent(mask)
+        if component is None:
+            return np.empty((0, 2), dtype=np.float32)
+
+        padded = np.pad(component, 1, mode="constant", constant_values=False)
+        interior = padded[1:-1, 1:-1] & padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:]
+        boundary = component & ~interior
+        ys, xs = np.nonzero(boundary)
+        points = np.column_stack((xs, ys)).astype(np.float32)
+
+        if points.shape[0] > MAX_BOUNDARY_POINTS:
+            step = int(np.ceil(points.shape[0] / MAX_BOUNDARY_POINTS))
+            points = points[::step]
+        return points
+
+    def getLargestMaskComponent(self, mask):
+        mask = np.asarray(mask, dtype=bool)
+        if mask.size == 0 or not np.any(mask):
+            return None
+
+        height, width = mask.shape
+        labels = np.zeros((height, width), dtype=np.int32)
+        coords = np.argwhere(mask)
+        label = 0
+        best_label = 0
+        best_count = 0
+        neighbours = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+
+        for seed_y, seed_x in coords:
+            if labels[seed_y, seed_x] != 0:
+                continue
+
+            label += 1
+            count = 0
+            stack = [(int(seed_y), int(seed_x))]
+            labels[seed_y, seed_x] = label
+
+            while stack:
+                y, x = stack.pop()
+                count += 1
+                for dy, dx in neighbours:
+                    ny = y + dy
+                    nx = x + dx
+                    if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and labels[ny, nx] == 0:
+                        labels[ny, nx] = label
+                        stack.append((ny, nx))
+
+            if count > best_count:
+                best_count = count
+                best_label = label
+
+        return labels == best_label
+
+    def boundaryPixelsToLocalPoints(self, boundary_pixels, image_width: int, image_height: int, microns_per_pixel: float):
+        scale_mm = float(microns_per_pixel) / 1000.0
+        xs = boundary_pixels[:, 0]
+        ys = boundary_pixels[:, 1]
+        x_mm = (xs - (image_width - 1) / 2.0) * scale_mm
+        y_mm = ((image_height - 1) / 2.0 - ys) * scale_mm
+        z_mm = np.zeros_like(x_mm)
+        return np.column_stack((x_mm, y_mm, z_mm)).astype(np.float32)
+
+    def rotateBoundaryPoints(self, points, orientation):
+        qw, qx, qy, qz = orientation
+        rotation = QQuaternion(float(qw), float(qx), float(qy), float(qz)).normalized()
+        axis_correction = QQuaternion.fromEulerAngles(0, 180, 90)
+        corrected_rotation = rotation * axis_correction
+        rotated = np.empty_like(points, dtype=np.float32)
+
+        for index, (x, y, z) in enumerate(points):
+            vector = corrected_rotation.rotatedVector(QVector3D(float(x), float(y), float(z)))
+            rotated[index] = (vector.x(), vector.y(), vector.z())
+        return rotated
+
+    def showBoundaryWindow(self, points):
+        if self.boundaryWindow is None:
+            self.boundaryWindow = BoundaryWindow(self)
+            self.boundaryWindow.resize(900, 650)
+
+        self.boundaryWindow.setPoints(points)
+        self.boundaryWindow.show()
+        self.boundaryWindow.raise_()
+        self.boundaryWindow.activateWindow()
 
     def loadYoloModel(self):
         if not YOLO_MODEL_PATH.exists():
@@ -946,8 +1162,8 @@ class MainWidget(QtWidgets.QMainWindow):
     def button(self, button: int, clicks: int):
         self.statusBar().showMessage(f"Button {button} pressed w/ {clicks} clicks")
 
-    @Slot(QtGui.QImage, float, int, int)
-    def image(self, img, microns_per_pixel: float, scan_width: int, scan_height: int):
+    @Slot(QtGui.QImage, float, int, int, float, float, float, float, bool)
+    def image(self, img, microns_per_pixel: float, scan_width: int, scan_height: int, qw: float, qx: float, qy: float, qz: float, has_imu_data: bool):
         if self.is_shutting_down:
             return
 
@@ -955,6 +1171,8 @@ class MainWidget(QtWidgets.QMainWindow):
         self.latest_scan_width = scan_width
         self.latest_scan_height = scan_height
         self.latest_image = img.copy()
+        self.latest_orientation = (qw, qx, qy, qz)
+        self.latest_has_imu_data = has_imu_data
         self.originalView.updateImage(img)
         self.processedView.updateImage(self.processImageForDisplay(img, microns_per_pixel))
 
@@ -978,6 +1196,12 @@ class MainWidget(QtWidgets.QMainWindow):
             signaller.image.disconnect(self.image)
         except (RuntimeError, TypeError):
             pass
+
+        try:
+            if self.boundaryWindow is not None:
+                self.boundaryWindow.close()
+        except Exception as exc:
+            print(f"Boundary window close failed: {exc}", file=sys.stderr)
 
         try:
             if self.cast is not None and self.cast.isConnected():
@@ -1020,6 +1244,14 @@ def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angl
         signaller.microns_per_pixel = float(micronsPerPixel)
         signaller.scan_width = int(width)
         signaller.scan_height = int(height)
+        signaller.has_imu_data = imu is not None and len(imu) > 0
+
+        if signaller.has_imu_data:
+            signaller.qw = float(getattr(imu[0], "qw", 1.0))
+            signaller.qx = float(getattr(imu[0], "qx", 0.0))
+            signaller.qy = float(getattr(imu[0], "qy", 0.0))
+            signaller.qz = float(getattr(imu[0], "qz", 0.0))
+
         QtCore.QCoreApplication.postEvent(signaller, ImageEvent())
 
 
