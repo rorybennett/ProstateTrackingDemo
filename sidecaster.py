@@ -9,6 +9,10 @@ from typing import Final
 APP_DIR = Path(__file__).resolve().parent
 LIB_DIR = APP_DIR / "libraries"
 MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
+SRC_DIR = APP_DIR / "src"
+LEFT_ARROW_ICON_PATH = SRC_DIR / "move_left.png"
+RIGHT_ARROW_ICON_PATH = SRC_DIR / "move_right.png"
+OK_ICON_PATH = SRC_DIR / "correct.png"
 PY_TAG = f"python{sys.version_info.major}{sys.version_info.minor}"
 PY_LIB_DIR = LIB_DIR / PY_TAG
 LIB_SEARCH_DIRS = [PY_LIB_DIR, LIB_DIR]
@@ -57,6 +61,9 @@ CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
+CENTRE_TOLERANCE_FRACTION: Final = 0.12
+GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
+GUIDANCE_ICON_MARGIN: Final = 20
 
 
 class FreezeEvent(QtCore.QEvent):
@@ -138,6 +145,7 @@ class MainWidget(QtWidgets.QMainWindow):
         QtWidgets.QMainWindow.__init__(self, parent)
         self.cast = cast
         self.yolo_model = None
+        self.guidance_icons = {}
         self.setWindowTitle("Clarius Cast Dual Display Demo")
 
         central = QtWidgets.QWidget()
@@ -283,6 +291,7 @@ class MainWidget(QtWidgets.QMainWindow):
         signaller.image.connect(self.image)
 
         self.yolo_model = self.loadYoloModel()
+        self.guidance_icons = self.loadGuidanceIcons()
 
         path = os.path.expanduser("~/")
         if cast.init(path, 640, 480):
@@ -303,6 +312,15 @@ class MainWidget(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Failed to load YOLO model: {exc}")
             return None
 
+    def loadGuidanceIcons(self):
+        paths = {"left": LEFT_ARROW_ICON_PATH, "right": RIGHT_ARROW_ICON_PATH, "ok": OK_ICON_PATH}
+        icons = {}
+        for key, path in paths.items():
+            icon = QtGui.QPixmap(str(path))
+            if not icon.isNull():
+                icons[key] = icon
+        return icons
+
     def qImageToRgbArray(self, img):
         rgb_img = img.convertToFormat(QtGui.QImage.Format_RGB888)
         width = rgb_img.width()
@@ -310,6 +328,33 @@ class MainWidget(QtWidgets.QMainWindow):
         buffer = rgb_img.bits()
         arr = np.frombuffer(buffer, dtype=np.uint8).reshape((height, rgb_img.bytesPerLine()))
         return arr[:, :width * 3].reshape((height, width, 3)).copy()
+
+    def getGuidanceState(self, box_centre_x, image_width):
+        image_centre_x = image_width / 2
+        tolerance = image_width * CENTRE_TOLERANCE_FRACTION
+        if box_centre_x > image_centre_x + tolerance:
+            return "left"
+        if box_centre_x < image_centre_x - tolerance:
+            return "right"
+        return "ok"
+
+    def drawGuidanceIcon(self, painter, output_img, guidance_state):
+        icon = self.guidance_icons.get(guidance_state)
+        icon_size = max(48, int(output_img.width() * GUIDANCE_ICON_SIZE_FRACTION))
+        x = output_img.width() - icon_size - GUIDANCE_ICON_MARGIN
+        y = GUIDANCE_ICON_MARGIN
+
+        if icon is not None:
+            scaled_icon = icon.scaled(icon_size, icon_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            painter.drawPixmap(x, y, scaled_icon)
+            return
+
+        fallback_text = {"left": "←", "right": "→", "ok": "OK"}[guidance_state]
+        font = QtGui.QFont()
+        font.setBold(True)
+        font.setPointSize(max(20, icon_size // 3))
+        painter.setFont(font)
+        painter.drawText(QtCore.QRectF(x, y, icon_size, icon_size), QtCore.Qt.AlignCenter, fallback_text)
 
     def processImageForDisplay(self, original_img):
         output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
@@ -333,12 +378,16 @@ class MainWidget(QtWidgets.QMainWindow):
         cls_id = int(boxes.cls[best_idx].item()) if boxes.cls is not None else None
         label = f"{self.yolo_model.names.get(cls_id, cls_id)} {conf:.2f}" if cls_id is not None else f"{conf:.2f}"
 
+        box_centre_x = (x1 + x2) / 2
+        guidance_state = self.getGuidanceState(box_centre_x, output_img.width())
+
         painter = QtGui.QPainter(output_img)
         pen = QtGui.QPen(QtCore.Qt.green)
         pen.setWidth(3)
         painter.setPen(pen)
         painter.drawRect(QtCore.QRectF(x1, y1, x2 - x1, y2 - y1))
         painter.drawText(QtCore.QPointF(x1 + 4, max(16, y1 - 6)), label)
+        self.drawGuidanceIcon(painter, output_img, guidance_state)
         painter.end()
 
         return output_img
