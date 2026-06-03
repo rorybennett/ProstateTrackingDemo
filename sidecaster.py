@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+from __future__ import annotations
+
 import ctypes
 import os
 import re
@@ -7,50 +9,64 @@ import sys
 from pathlib import Path
 from typing import Final
 
-APP_DIR = Path(__file__).resolve().parent
-LIB_DIR = APP_DIR / "libraries"
-YOLO_MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
-UNET_MODEL_PATH = APP_DIR / "models" / "unet_phantom_latest.pth"
-UNET_TRAINING_PARAMETERS_PATH = UNET_MODEL_PATH.with_name("training_parameters.txt")
-SRC_DIR = APP_DIR / "src"
-LEFT_ARROW_ICON_PATH = SRC_DIR / "move_left.png"
-RIGHT_ARROW_ICON_PATH = SRC_DIR / "move_right.png"
-OK_ICON_PATH = SRC_DIR / "correct.png"
-NO_DETECTION_ICON_PATH = SRC_DIR / "no_detection.png"
-PY_TAG = f"python{sys.version_info.major}{sys.version_info.minor}"
-PY_LIB_DIR = LIB_DIR / PY_TAG
-LIB_SEARCH_DIRS = [PY_LIB_DIR, LIB_DIR]
+APP_DIR: Final = Path(__file__).resolve().parent
+LIB_DIR: Final = APP_DIR / "libraries"
+SRC_DIR: Final = APP_DIR / "src"
 
-dll_dir_handles = []
-libcast_handle = None
+YOLO_MODEL_PATH: Final = APP_DIR / "models" / "yolo_x_phantom_best.pt"
+UNET_MODEL_PATH: Final = APP_DIR / "models" / "unet_phantom_latest.pth"
+UNET_TRAINING_PARAMETERS_PATH: Final = UNET_MODEL_PATH.with_name("training_parameters.txt")
+
+LEFT_ARROW_ICON_PATH: Final = SRC_DIR / "move_left.png"
+RIGHT_ARROW_ICON_PATH: Final = SRC_DIR / "move_right.png"
+OK_ICON_PATH: Final = SRC_DIR / "correct.png"
+NO_DETECTION_ICON_PATH: Final = SRC_DIR / "no_detection.png"
+
+PY_TAG: Final = f"python{sys.version_info.major}{sys.version_info.minor}"
+PY_LIB_DIR: Final = LIB_DIR / PY_TAG
+LIB_SEARCH_DIRS: Final = (PY_LIB_DIR, LIB_DIR)
+
+DLL_DIR_HANDLES = []
+LIBCAST_HANDLE = None
 SHUTTING_DOWN = False
 
 
-def find_lib(filename):
+def find_lib(filename: str) -> Path:
     for lib_dir in LIB_SEARCH_DIRS:
         path = lib_dir / filename
         if path.exists():
             return path
+
     checked = ", ".join(str(lib_dir / filename) for lib_dir in LIB_SEARCH_DIRS)
     raise FileNotFoundError(f"Could not find {filename}. Checked: {checked}")
 
 
-for lib_dir in LIB_SEARCH_DIRS:
-    if lib_dir.exists() and str(lib_dir) not in sys.path:
-        sys.path.insert(0, str(lib_dir))
-
-if sys.platform.startswith("win"):
+def prepare_library_paths() -> None:
     for lib_dir in LIB_SEARCH_DIRS:
-        if lib_dir.exists():
-            dll_dir_handles.append(os.add_dll_directory(str(lib_dir)))
-    ctypes.WinDLL(str(find_lib("cast.dll")))
+        if lib_dir.exists() and str(lib_dir) not in sys.path:
+            sys.path.insert(0, str(lib_dir))
 
-elif sys.platform.startswith("linux"):
-    libcast_handle = ctypes.CDLL(str(find_lib("libcast.so")), ctypes.RTLD_GLOBAL)._handle
-    ctypes.cdll.LoadLibrary(str(find_lib("pyclariuscast.so")))
 
-import pyclariuscast
+def load_platform_libraries() -> None:
+    global LIBCAST_HANDLE
+
+    if sys.platform.startswith("win"):
+        for lib_dir in LIB_SEARCH_DIRS:
+            if lib_dir.exists():
+                DLL_DIR_HANDLES.append(os.add_dll_directory(str(lib_dir)))
+        ctypes.WinDLL(str(find_lib("cast.dll")))
+        return
+
+    if sys.platform.startswith("linux"):
+        LIBCAST_HANDLE = ctypes.CDLL(str(find_lib("libcast.so")), ctypes.RTLD_GLOBAL)._handle
+        ctypes.cdll.LoadLibrary(str(find_lib("pyclariuscast.so")))
+
+
+prepare_library_paths()
+load_platform_libraries()
+
 import numpy as np
+import pyclariuscast
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Slot
 from ultralytics import YOLO
@@ -59,6 +75,7 @@ try:
     import torch
     import torch.nn.functional as torch_nn_F
     from UNet import UNet
+
     UNET_IMPORT_ERROR = None
 except Exception as exc:
     torch = None
@@ -75,8 +92,10 @@ CMD_GAIN_DEC: Final = 6
 CMD_GAIN_INC: Final = 7
 CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
+
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
+
 UNET_INPUT_SIZE: Final = 600
 UNET_LOGIT_THRESHOLD: Final = 0.50
 UNET_LOGIT_THRESHOLD_MIN: Final = 0.00
@@ -85,31 +104,42 @@ UNET_LOGIT_THRESHOLD_SCALE: Final = 100
 UNET_TRAIN_MEAN: Final = 0.07007993166086769
 UNET_TRAIN_STD: Final = 0.15056420456784336
 UNET_MASK_ALPHA: Final = 90
+
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
+
 ROI_DEFAULT_PERCENT: Final = 50
 ROI_MIN_PERCENT: Final = 1
 ROI_MAX_PERCENT: Final = 100
-MEASUREMENT_BUTTONS: Final = {3: ("RL", "Calculate RL"), 4: ("AP", "Calculate AP"), 5: ("SI", "Calculate SI")}
+
+MEASUREMENT_BUTTONS: Final = {
+    3: ("RL", "Calculate RL"),
+    4: ("AP", "Calculate AP"),
+    5: ("SI", "Calculate SI"),
+}
+
+FREEZE_EVENT_TYPE: Final = QtCore.QEvent.Type(QtCore.QEvent.User)
+BUTTON_EVENT_TYPE: Final = QtCore.QEvent.Type(QtCore.QEvent.User + 1)
+IMAGE_EVENT_TYPE: Final = QtCore.QEvent.Type(QtCore.QEvent.User + 2)
 
 
 class FreezeEvent(QtCore.QEvent):
-    def __init__(self, frozen):
-        super().__init__(QtCore.QEvent.User)
+    def __init__(self, frozen: bool):
+        super().__init__(FREEZE_EVENT_TYPE)
         self.frozen = frozen
 
 
 class ButtonEvent(QtCore.QEvent):
-    def __init__(self, btn, clicks):
-        super().__init__(QtCore.QEvent.Type(QtCore.QEvent.User + 1))
-        self.btn = btn
+    def __init__(self, button: int, clicks: int):
+        super().__init__(BUTTON_EVENT_TYPE)
+        self.button = button
         self.clicks = clicks
 
 
 class ImageEvent(QtCore.QEvent):
     def __init__(self):
-        super().__init__(QtCore.QEvent.Type(QtCore.QEvent.User + 2))
+        super().__init__(IMAGE_EVENT_TYPE)
 
 
 class Signaller(QtCore.QObject):
@@ -118,7 +148,7 @@ class Signaller(QtCore.QObject):
     image = QtCore.Signal(QtGui.QImage, float, int, int)
 
     def __init__(self):
-        QtCore.QObject.__init__(self)
+        super().__init__()
         self.usimage = QtGui.QImage()
         self.microns_per_pixel = 0.0
         self.scan_width = 0
@@ -127,21 +157,27 @@ class Signaller(QtCore.QObject):
     def event(self, evt):
         if SHUTTING_DOWN:
             return True
-        if evt.type() == QtCore.QEvent.User:
+
+        event_type = evt.type()
+        if event_type == FREEZE_EVENT_TYPE:
             self.freeze.emit(evt.frozen)
-        elif evt.type() == QtCore.QEvent.Type(QtCore.QEvent.User + 1):
-            self.button.emit(evt.btn, evt.clicks)
-        elif evt.type() == QtCore.QEvent.Type(QtCore.QEvent.User + 2):
+            return True
+        if event_type == BUTTON_EVENT_TYPE:
+            self.button.emit(evt.button, evt.clicks)
+            return True
+        if event_type == IMAGE_EVENT_TYPE:
             self.image.emit(self.usimage, self.microns_per_pixel, self.scan_width, self.scan_height)
-        return True
+            return True
+
+        return super().event(evt)
 
 
 signaller = Signaller()
 
 
 class ImageView(QtWidgets.QGraphicsView):
-    def __init__(self, cast=None, controls_output_size=False):
-        QtWidgets.QGraphicsView.__init__(self)
+    def __init__(self, cast=None, controls_output_size: bool = False):
+        super().__init__()
         self.cast = cast
         self.controls_output_size = controls_output_size
         self.image = QtGui.QImage()
@@ -153,16 +189,18 @@ class ImageView(QtWidgets.QGraphicsView):
         self.scene().invalidate()
         self.viewport().update()
 
-    def saveImage(self, filename):
+    def saveImage(self, filename: Path):
         if not self.image.isNull():
             self.image.save(str(filename))
 
     def resizeEvent(self, evt):
-        w = evt.size().width()
-        h = evt.size().height()
+        width = evt.size().width()
+        height = evt.size().height()
+
         if self.controls_output_size and self.cast is not None and not SHUTTING_DOWN:
-            self.cast.setOutputSize(w, h)
-        self.setSceneRect(0, 0, w, h)
+            self.cast.setOutputSize(width, height)
+
+        self.setSceneRect(0, 0, width, height)
         super().resizeEvent(evt)
 
     def drawBackground(self, painter, rect):
@@ -175,10 +213,12 @@ class ImageView(QtWidgets.QGraphicsView):
 
 class MainWidget(QtWidgets.QMainWindow):
     def __init__(self, cast, parent=None):
-        QtWidgets.QMainWindow.__init__(self, parent)
+        super().__init__(parent)
         self.cast = cast
+
         self.yolo_model = None
         self.yolo_enabled = True
+
         self.unet_model = None
         self.unet_device = None
         self.unet_input_size = UNET_INPUT_SIZE
@@ -186,174 +226,66 @@ class MainWidget(QtWidgets.QMainWindow):
         self.unet_train_mean = UNET_TRAIN_MEAN
         self.unet_train_std = UNET_TRAIN_STD
         self.unet_enabled = False
+
         self.guidance_icons = {}
         self.measurements_enabled = {key: False for key, _ in MEASUREMENT_BUTTONS.values()}
+
         self.latest_scan_width = 0
         self.latest_scan_height = 0
         self.latest_microns_per_pixel = 0.0
         self.latest_image = QtGui.QImage()
+
         self.roi_percent = ROI_DEFAULT_PERCENT
         self.is_shutting_down = False
-        self.setWindowTitle("Clarius Cast Dual Display Demo")
 
+        self.setWindowTitle("Clarius Cast Dual Display Demo")
+        self.setupUi()
+        self.connectSignals()
+        self.loadModelsAndIcons()
+        self.initialiseCast()
+
+    def setupUi(self):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
 
-        ip = QtWidgets.QLineEdit("192.168.1.1")
-        ip.setInputMask("000.000.000.000")
-        port = QtWidgets.QLineEdit("5828")
-        port.setInputMask("00000")
+        self.ipInput = QtWidgets.QLineEdit("192.168.1.1")
+        self.ipInput.setInputMask("000.000.000.000")
+        self.portInput = QtWidgets.QLineEdit("5828")
+        self.portInput.setInputMask("00000")
 
-        conn = QtWidgets.QPushButton("Connect")
+        self.connectButton = QtWidgets.QPushButton("Connect")
         self.run = QtWidgets.QPushButton("Run")
-        quit = QtWidgets.QPushButton("Quit")
-        depthUp = QtWidgets.QPushButton("< Depth")
-        depthDown = QtWidgets.QPushButton("> Depth")
-        gainInc = QtWidgets.QPushButton("> Gain")
-        gainDec = QtWidgets.QPushButton("< Gain")
-        captureImage = QtWidgets.QPushButton("Capture Image")
-        captureCine = QtWidgets.QPushButton("Capture Movie")
-        saveImage = QtWidgets.QPushButton("Save Local")
-        bMode = QtWidgets.QPushButton("B Mode")
-        cfiMode = QtWidgets.QPushButton("Color Mode")
+        self.quitButton = QtWidgets.QPushButton("Quit")
+        self.depthUpButton = QtWidgets.QPushButton("< Depth")
+        self.depthDownButton = QtWidgets.QPushButton("> Depth")
+        self.gainIncButton = QtWidgets.QPushButton("> Gain")
+        self.gainDecButton = QtWidgets.QPushButton("< Gain")
+        self.captureImageButton = QtWidgets.QPushButton("Capture Image")
+        self.captureCineButton = QtWidgets.QPushButton("Capture Movie")
+        self.saveImageButton = QtWidgets.QPushButton("Save Local")
+        self.bModeButton = QtWidgets.QPushButton("B Mode")
+        self.cfiModeButton = QtWidgets.QPushButton("Color Mode")
 
-        def tryConnect():
-            if not cast.isConnected():
-                if cast.connect(ip.text(), int(port.text()), "research"):
-                    self.statusBar().showMessage("Connected")
-                    conn.setText("Disconnect")
-                else:
-                    self.statusBar().showMessage(f"Failed to connect to {ip.text()}")
-            elif cast.disconnect():
-                self.statusBar().showMessage("Disconnected")
-                conn.setText("Connect")
-            else:
-                self.statusBar().showMessage("Failed to disconnect")
+        self.setupProcessingControls()
+        self.originalView = ImageView(self.cast, controls_output_size=True)
+        self.processedView = ImageView()
 
-        def tryFreeze():
-            if cast.isConnected():
-                cast.userFunction(CMD_FREEZE, 0)
+        central.setLayout(self.buildMainLayout())
 
-        def tryDepthUp():
-            if cast.isConnected():
-                cast.userFunction(CMD_DEPTH_DEC, 0)
-
-        def tryDepthDown():
-            if cast.isConnected():
-                cast.userFunction(CMD_DEPTH_INC, 0)
-
-        def tryGainDec():
-            if cast.isConnected():
-                cast.userFunction(CMD_GAIN_DEC, 0)
-
-        def tryGainInc():
-            if cast.isConnected():
-                cast.userFunction(CMD_GAIN_INC, 0)
-
-        def tryCaptureImage():
-            if cast.isConnected():
-                cast.userFunction(CMD_CAPTURE_IMAGE, 0)
-
-        def tryCaptureCine():
-            if cast.isConnected():
-                cast.userFunction(CMD_CAPTURE_CINE, 0)
-
-        def trySaveImage():
-            self.originalView.saveImage(Path.home() / "Pictures/clarius_original_image.png")
-            self.processedView.saveImage(Path.home() / "Pictures/clarius_processed_image.png")
-            self.statusBar().showMessage("Saved original and processed images")
-
-        def tryBMode():
-            if cast.isConnected():
-                cast.userFunction(CMD_B_MODE, 0)
-
-        def tryCfiMode():
-            if cast.isConnected():
-                cast.userFunction(CMD_CFI_MODE, 0)
-
-        def tryToggleYolo(checked):
-            self.yolo_enabled = checked
-            self.yoloToggleButton.setText("YOLO: On" if checked else "YOLO: Off")
-            if checked:
-                self.unet_enabled = False
-                self.unetToggleButton.blockSignals(True)
-                self.unetToggleButton.setChecked(False)
-                self.unetToggleButton.blockSignals(False)
-                self.unetToggleButton.setText("UNet: Off")
-            if checked and self.yolo_model is None:
-                self.statusBar().showMessage("YOLO enabled, but model is not loaded")
-            else:
-                self.statusBar().showMessage(f"YOLO detection {'enabled' if checked else 'disabled'}")
-
-        def tryToggleUnet(checked):
-            self.unet_enabled = checked
-            self.unetToggleButton.setText("UNet: On" if checked else "UNet: Off")
-            if checked:
-                self.yolo_enabled = False
-                self.yoloToggleButton.blockSignals(True)
-                self.yoloToggleButton.setChecked(False)
-                self.yoloToggleButton.blockSignals(False)
-                self.yoloToggleButton.setText("YOLO: Off")
-            if checked and self.unet_model is None:
-                self.statusBar().showMessage("UNet enabled, but model is not loaded")
-            else:
-                self.statusBar().showMessage(f"UNet segmentation {'enabled' if checked else 'disabled'}")
-
-        def tryToolButton(index, checked=False):
-            if index in MEASUREMENT_BUTTONS:
-                key, _ = MEASUREMENT_BUTTONS[index]
-                self.measurements_enabled[key] = checked
-                state = "enabled" if checked else "disabled"
-                if checked and not (self.yolo_enabled or self.unet_enabled):
-                    self.statusBar().showMessage(f"{key} measurement enabled, but YOLO and UNet are off")
-                else:
-                    self.statusBar().showMessage(f"{key} measurement {state}")
-                return
-            self.statusBar().showMessage(f"Tool button {index} pressed")
-
-        def tryRoiChanged(value):
-            self.roi_percent = int(value)
-            self.roiLabel.setText(f"ROI {self.roi_percent}%")
-            if not self.latest_image.isNull():
-                self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
-            self.statusBar().showMessage(f"Processed ROI width set to {self.roi_percent}%")
-
-        def tryUnetThresholdChanged(value):
-            self.unet_logit_threshold = float(value) / UNET_LOGIT_THRESHOLD_SCALE
-            self.unetThresholdLabel.setText(f"UNet Threshold {self.unet_logit_threshold:.2f}")
-            if not self.latest_image.isNull():
-                self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
-            self.statusBar().showMessage(f"UNet logit threshold set to {self.unet_logit_threshold:.2f}")
-
-        conn.clicked.connect(tryConnect)
-        self.run.clicked.connect(tryFreeze)
-        quit.clicked.connect(self.close)
-        depthUp.clicked.connect(tryDepthUp)
-        depthDown.clicked.connect(tryDepthDown)
-        gainInc.clicked.connect(tryGainInc)
-        gainDec.clicked.connect(tryGainDec)
-        captureImage.clicked.connect(tryCaptureImage)
-        captureCine.clicked.connect(tryCaptureCine)
-        saveImage.clicked.connect(trySaveImage)
-        bMode.clicked.connect(tryBMode)
-        cfiMode.clicked.connect(tryCfiMode)
-
+    def setupProcessingControls(self):
         self.yoloToggleButton = QtWidgets.QPushButton("YOLO: On")
         self.yoloToggleButton.setCheckable(True)
         self.yoloToggleButton.setChecked(self.yolo_enabled)
-        self.yoloToggleButton.clicked.connect(tryToggleYolo)
 
         self.unetToggleButton = QtWidgets.QPushButton("UNet: Off")
         self.unetToggleButton.setCheckable(True)
         self.unetToggleButton.setChecked(self.unet_enabled)
-        self.unetToggleButton.clicked.connect(tryToggleUnet)
 
         self.toolButtons = [self.yoloToggleButton, self.unetToggleButton]
-        for index in range(3, 6):
-            key, label = MEASUREMENT_BUTTONS[index]
+        for index, (_, label) in MEASUREMENT_BUTTONS.items():
             button = QtWidgets.QPushButton(label)
             button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx, checked))
+            button.clicked.connect(lambda checked=False, idx=index: self.tryToolButton(idx, checked))
             self.toolButtons.append(button)
 
         self.roiLabel = QtWidgets.QLabel(f"ROI {self.roi_percent}%")
@@ -364,108 +296,243 @@ class MainWidget(QtWidgets.QMainWindow):
         self.roiSlider.setTickInterval(10)
         self.roiSlider.setTickPosition(QtWidgets.QSlider.TicksBelow)
         self.roiSlider.setMinimumWidth(180)
-        self.roiSlider.valueChanged.connect(tryRoiChanged)
 
         self.unetThresholdLabel = QtWidgets.QLabel(f"UNet Threshold {self.unet_logit_threshold:.2f}")
         self.unetThresholdLabel.setAlignment(QtCore.Qt.AlignCenter)
         self.unetThresholdSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.unetThresholdSlider.setRange(int(UNET_LOGIT_THRESHOLD_MIN * UNET_LOGIT_THRESHOLD_SCALE), int(UNET_LOGIT_THRESHOLD_MAX * UNET_LOGIT_THRESHOLD_SCALE))
+        self.unetThresholdSlider.setRange(
+            int(UNET_LOGIT_THRESHOLD_MIN * UNET_LOGIT_THRESHOLD_SCALE),
+            int(UNET_LOGIT_THRESHOLD_MAX * UNET_LOGIT_THRESHOLD_SCALE),
+        )
         self.unetThresholdSlider.setValue(int(round(self.unet_logit_threshold * UNET_LOGIT_THRESHOLD_SCALE)))
         self.unetThresholdSlider.setTickInterval(10)
         self.unetThresholdSlider.setTickPosition(QtWidgets.QSlider.TicksBelow)
         self.unetThresholdSlider.setMinimumWidth(180)
-        self.unetThresholdSlider.valueChanged.connect(tryUnetThresholdChanged)
 
-        self.originalView = ImageView(cast, controls_output_size=True)
-        self.processedView = ImageView()
+    def buildMainLayout(self):
+        layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(self.buildDisplayLayout())
+        layout.addLayout(self.buildInputLayout())
+        layout.addLayout(self.buildConnectionLayout())
+        layout.addLayout(self.buildParameterLayout())
+        layout.addLayout(self.buildCaptureLayout())
+        layout.addLayout(self.buildModeLayout())
+        return layout
 
-        originalGroup = QtWidgets.QGroupBox("Original ultrasound image")
-        originalLayout = QtWidgets.QVBoxLayout()
-        originalLayout.addWidget(self.originalView)
-        originalGroup.setLayout(originalLayout)
+    def buildDisplayLayout(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(self.buildOriginalGroup())
+        layout.addWidget(self.buildProcessedGroup())
+        return layout
 
-        processedGroup = QtWidgets.QGroupBox("Processed image")
-        processedLayout = QtWidgets.QHBoxLayout()
-        processedButtonLayout = QtWidgets.QVBoxLayout()
-        processedLayout.addWidget(self.processedView, 1)
+    def buildOriginalGroup(self):
+        group = QtWidgets.QGroupBox("Original ultrasound image")
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(self.originalView)
+        group.setLayout(layout)
+        return group
+
+    def buildProcessedGroup(self):
+        group = QtWidgets.QGroupBox("Processed image")
+        layout = QtWidgets.QHBoxLayout()
+        button_layout = QtWidgets.QVBoxLayout()
+
+        layout.addWidget(self.processedView, 1)
         for button in self.toolButtons:
             button.setMinimumWidth(100)
-            processedButtonLayout.addWidget(button)
-        processedButtonLayout.addWidget(self.roiLabel)
-        processedButtonLayout.addWidget(self.roiSlider)
-        processedButtonLayout.addWidget(self.unetThresholdLabel)
-        processedButtonLayout.addWidget(self.unetThresholdSlider)
-        processedButtonLayout.addStretch(1)
-        processedLayout.addLayout(processedButtonLayout)
-        processedGroup.setLayout(processedLayout)
+            button_layout.addWidget(button)
 
-        displayLayout = QtWidgets.QHBoxLayout()
-        displayLayout.addWidget(originalGroup)
-        displayLayout.addWidget(processedGroup)
+        button_layout.addWidget(self.roiLabel)
+        button_layout.addWidget(self.roiSlider)
+        button_layout.addWidget(self.unetThresholdLabel)
+        button_layout.addWidget(self.unetThresholdSlider)
+        button_layout.addStretch(1)
+        layout.addLayout(button_layout)
+        group.setLayout(layout)
+        return group
 
-        layout = QtWidgets.QVBoxLayout()
-        layout.addLayout(displayLayout)
+    def buildInputLayout(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(self.ipInput)
+        layout.addWidget(self.portInput)
+        return layout
 
-        inplayout = QtWidgets.QHBoxLayout()
-        layout.addLayout(inplayout)
-        inplayout.addWidget(ip)
-        inplayout.addWidget(port)
+    def buildConnectionLayout(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(self.connectButton)
+        layout.addWidget(self.run)
+        layout.addWidget(self.quitButton)
+        return layout
 
-        connlayout = QtWidgets.QHBoxLayout()
-        layout.addLayout(connlayout)
-        connlayout.addWidget(conn)
-        connlayout.addWidget(self.run)
-        connlayout.addWidget(quit)
-        central.setLayout(layout)
+    def buildParameterLayout(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(self.depthUpButton)
+        layout.addWidget(self.depthDownButton)
+        layout.addWidget(self.gainDecButton)
+        layout.addWidget(self.gainIncButton)
+        return layout
 
-        prmlayout = QtWidgets.QHBoxLayout()
-        layout.addLayout(prmlayout)
-        prmlayout.addWidget(depthUp)
-        prmlayout.addWidget(depthDown)
-        prmlayout.addWidget(gainDec)
-        prmlayout.addWidget(gainInc)
+    def buildCaptureLayout(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(self.captureImageButton)
+        layout.addWidget(self.captureCineButton)
+        layout.addWidget(self.saveImageButton)
+        return layout
 
-        caplayout = QtWidgets.QHBoxLayout()
-        layout.addLayout(caplayout)
-        caplayout.addWidget(captureImage)
-        caplayout.addWidget(captureCine)
-        caplayout.addWidget(saveImage)
+    def buildModeLayout(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(self.bModeButton)
+        layout.addWidget(self.cfiModeButton)
+        return layout
 
-        modelayout = QtWidgets.QHBoxLayout()
-        layout.addLayout(modelayout)
-        modelayout.addWidget(bMode)
-        modelayout.addWidget(cfiMode)
+    def connectSignals(self):
+        self.connectButton.clicked.connect(self.tryConnect)
+        self.run.clicked.connect(lambda: self.sendCastCommand(CMD_FREEZE))
+        self.quitButton.clicked.connect(self.close)
+        self.depthUpButton.clicked.connect(lambda: self.sendCastCommand(CMD_DEPTH_DEC))
+        self.depthDownButton.clicked.connect(lambda: self.sendCastCommand(CMD_DEPTH_INC))
+        self.gainIncButton.clicked.connect(lambda: self.sendCastCommand(CMD_GAIN_INC))
+        self.gainDecButton.clicked.connect(lambda: self.sendCastCommand(CMD_GAIN_DEC))
+        self.captureImageButton.clicked.connect(lambda: self.sendCastCommand(CMD_CAPTURE_IMAGE))
+        self.captureCineButton.clicked.connect(lambda: self.sendCastCommand(CMD_CAPTURE_CINE))
+        self.saveImageButton.clicked.connect(self.trySaveImage)
+        self.bModeButton.clicked.connect(lambda: self.sendCastCommand(CMD_B_MODE))
+        self.cfiModeButton.clicked.connect(lambda: self.sendCastCommand(CMD_CFI_MODE))
+        self.yoloToggleButton.clicked.connect(self.tryToggleYolo)
+        self.unetToggleButton.clicked.connect(self.tryToggleUnet)
+        self.roiSlider.valueChanged.connect(self.tryRoiChanged)
+        self.unetThresholdSlider.valueChanged.connect(self.tryUnetThresholdChanged)
 
         signaller.freeze.connect(self.freeze)
         signaller.button.connect(self.button)
         signaller.image.connect(self.image)
 
+    def loadModelsAndIcons(self):
         self.yolo_model = self.loadYoloModel()
         self.unet_model = self.loadUnetModel()
         self.guidance_icons = self.loadGuidanceIcons()
 
+    def initialiseCast(self):
         path = os.path.expanduser("~/")
-        if cast.init(path, 640, 480):
-            loaded = []
-            if self.yolo_model is not None:
-                loaded.append("YOLO")
-            if self.unet_model is not None:
-                loaded.append("UNet")
-            self.statusBar().showMessage("Initialized" + (" with " + " and ".join(loaded) if loaded else ""))
-        else:
+        if not self.cast.init(path, 640, 480):
             self.statusBar().showMessage("Failed to initialize")
+            return
+
+        loaded = []
+        if self.yolo_model is not None:
+            loaded.append("YOLO")
+        if self.unet_model is not None:
+            loaded.append("UNet")
+
+        message = "Initialized"
+        if loaded:
+            message += " with " + " and ".join(loaded)
+        self.statusBar().showMessage(message)
+
+    def sendCastCommand(self, command: int):
+        if self.cast.isConnected():
+            self.cast.userFunction(command, 0)
+
+    def tryConnect(self):
+        if not self.cast.isConnected():
+            if self.cast.connect(self.ipInput.text(), int(self.portInput.text()), "research"):
+                self.statusBar().showMessage("Connected")
+                self.connectButton.setText("Disconnect")
+            else:
+                self.statusBar().showMessage(f"Failed to connect to {self.ipInput.text()}")
+            return
+
+        if self.cast.disconnect():
+            self.statusBar().showMessage("Disconnected")
+            self.connectButton.setText("Connect")
+        else:
+            self.statusBar().showMessage("Failed to disconnect")
+
+    def trySaveImage(self):
+        self.originalView.saveImage(Path.home() / "Pictures/clarius_original_image.png")
+        self.processedView.saveImage(Path.home() / "Pictures/clarius_processed_image.png")
+        self.statusBar().showMessage("Saved original and processed images")
+
+    def tryToggleYolo(self, checked: bool):
+        self.yolo_enabled = checked
+        self.yoloToggleButton.setText("YOLO: On" if checked else "YOLO: Off")
+
+        if checked:
+            self.disableUnetToggle()
+
+        if checked and self.yolo_model is None:
+            self.statusBar().showMessage("YOLO enabled, but model is not loaded")
+        else:
+            state = "enabled" if checked else "disabled"
+            self.statusBar().showMessage(f"YOLO detection {state}")
+
+    def tryToggleUnet(self, checked: bool):
+        self.unet_enabled = checked
+        self.unetToggleButton.setText("UNet: On" if checked else "UNet: Off")
+
+        if checked:
+            self.disableYoloToggle()
+
+        if checked and self.unet_model is None:
+            self.statusBar().showMessage("UNet enabled, but model is not loaded")
+        else:
+            state = "enabled" if checked else "disabled"
+            self.statusBar().showMessage(f"UNet segmentation {state}")
+
+    def disableYoloToggle(self):
+        self.yolo_enabled = False
+        self.yoloToggleButton.blockSignals(True)
+        self.yoloToggleButton.setChecked(False)
+        self.yoloToggleButton.blockSignals(False)
+        self.yoloToggleButton.setText("YOLO: Off")
+
+    def disableUnetToggle(self):
+        self.unet_enabled = False
+        self.unetToggleButton.blockSignals(True)
+        self.unetToggleButton.setChecked(False)
+        self.unetToggleButton.blockSignals(False)
+        self.unetToggleButton.setText("UNet: Off")
+
+    def tryToolButton(self, index: int, checked: bool = False):
+        if index not in MEASUREMENT_BUTTONS:
+            self.statusBar().showMessage(f"Tool button {index} pressed")
+            return
+
+        key, _ = MEASUREMENT_BUTTONS[index]
+        self.measurements_enabled[key] = checked
+        state = "enabled" if checked else "disabled"
+
+        if checked and not (self.yolo_enabled or self.unet_enabled):
+            self.statusBar().showMessage(f"{key} measurement enabled, but YOLO and UNet are off")
+        else:
+            self.statusBar().showMessage(f"{key} measurement {state}")
+
+    def tryRoiChanged(self, value: int):
+        self.roi_percent = int(value)
+        self.roiLabel.setText(f"ROI {self.roi_percent}%")
+        self.refreshProcessedImage()
+        self.statusBar().showMessage(f"Processed ROI width set to {self.roi_percent}%")
+
+    def tryUnetThresholdChanged(self, value: int):
+        self.unet_logit_threshold = float(value) / UNET_LOGIT_THRESHOLD_SCALE
+        self.unetThresholdLabel.setText(f"UNet Threshold {self.unet_logit_threshold:.2f}")
+        self.refreshProcessedImage()
+        self.statusBar().showMessage(f"UNet logit threshold set to {self.unet_logit_threshold:.2f}")
+
+    def refreshProcessedImage(self):
+        if not self.latest_image.isNull():
+            self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
 
     def loadYoloModel(self):
         if not YOLO_MODEL_PATH.exists():
             self.statusBar().showMessage(f"YOLO model not found: {YOLO_MODEL_PATH}")
             return None
+
         try:
             return YOLO(str(YOLO_MODEL_PATH))
         except Exception as exc:
             self.statusBar().showMessage(f"Failed to load YOLO model: {exc}")
             return None
-
-
 
     def loadUnetValidationConfig(self, checkpoint=None):
         def as_float(value):
@@ -475,51 +542,62 @@ class MainWidget(QtWidgets.QMainWindow):
                 value = value.item()
             if isinstance(value, (int, float)):
                 return float(value)
+
             match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", str(value))
             return float(match.group(0)) if match else None
 
         configs = []
         if isinstance(checkpoint, dict):
-            configs.extend(item for item in (checkpoint.get("training_parameters"), checkpoint.get("config"), checkpoint.get("args")) if isinstance(item, dict))
+            keys = ("training_parameters", "config", "args")
+            configs.extend(item for item in (checkpoint.get(key) for key in keys) if isinstance(item, dict))
             configs.append(checkpoint)
 
         for config in configs:
-            for key in ("image_size", "input_size", "unet_input_size"):
-                value = as_float(config.get(key))
-                if value:
-                    self.unet_input_size = int(value)
-                    break
-            for key in ("train_mean", "training_mean", "mean"):
-                value = as_float(config.get(key))
-                if value is not None:
-                    self.unet_train_mean = value
-                    break
-            for key in ("train_std", "training_std", "std"):
-                value = as_float(config.get(key))
-                if value not in (None, 0):
-                    self.unet_train_std = value
-                    break
+            self.updateUnetConfigFromDict(config, as_float)
 
         for path in (UNET_TRAINING_PARAMETERS_PATH, UNET_MODEL_PATH.with_suffix(".txt")):
-            if not path.exists():
-                continue
-            try:
-                for line in path.read_text(errors="ignore").splitlines():
-                    if ":" not in line:
-                        continue
-                    key, value_text = line.split(":", 1)
-                    key = key.strip().lower().replace(" ", "_")
-                    value = as_float(value_text)
-                    if value is None:
-                        continue
-                    if key == "image_size":
-                        self.unet_input_size = int(value)
-                    elif key in {"train_mean", "training_mean", "mean"}:
-                        self.unet_train_mean = value
-                    elif key in {"train_std", "training_std", "std"} and value != 0:
-                        self.unet_train_std = value
-            except Exception as exc:
-                self.statusBar().showMessage(f"Could not read UNet validation config: {exc}")
+            if path.exists():
+                self.updateUnetConfigFromFile(path, as_float)
+
+    def updateUnetConfigFromDict(self, config: dict, as_float):
+        for key in ("image_size", "input_size", "unet_input_size"):
+            value = as_float(config.get(key))
+            if value:
+                self.unet_input_size = int(value)
+                break
+
+        for key in ("train_mean", "training_mean", "mean"):
+            value = as_float(config.get(key))
+            if value is not None:
+                self.unet_train_mean = value
+                break
+
+        for key in ("train_std", "training_std", "std"):
+            value = as_float(config.get(key))
+            if value not in (None, 0):
+                self.unet_train_std = value
+                break
+
+    def updateUnetConfigFromFile(self, path: Path, as_float):
+        try:
+            for line in path.read_text(errors="ignore").splitlines():
+                if ":" not in line:
+                    continue
+
+                key, value_text = line.split(":", 1)
+                key = key.strip().lower().replace(" ", "_")
+                value = as_float(value_text)
+                if value is None:
+                    continue
+
+                if key == "image_size":
+                    self.unet_input_size = int(value)
+                elif key in {"train_mean", "training_mean", "mean"}:
+                    self.unet_train_mean = value
+                elif key in {"train_std", "training_std", "std"} and value != 0:
+                    self.unet_train_std = value
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not read UNet validation config: {exc}")
 
     def loadUnetModel(self):
         if torch is None or UNet is None:
@@ -545,12 +623,19 @@ class MainWidget(QtWidgets.QMainWindow):
             return None
 
     def loadGuidanceIcons(self):
-        paths = {"left": LEFT_ARROW_ICON_PATH, "right": RIGHT_ARROW_ICON_PATH, "ok": OK_ICON_PATH, "no_detection": NO_DETECTION_ICON_PATH}
+        paths = {
+            "left": LEFT_ARROW_ICON_PATH,
+            "right": RIGHT_ARROW_ICON_PATH,
+            "ok": OK_ICON_PATH,
+            "no_detection": NO_DETECTION_ICON_PATH,
+        }
         icons = {}
+
         for key, path in paths.items():
             icon = QtGui.QPixmap(str(path))
             if not icon.isNull():
                 icons[key] = icon
+
         return icons
 
     def qImageToRgbArray(self, img):
@@ -559,7 +644,7 @@ class MainWidget(QtWidgets.QMainWindow):
         height = rgb_img.height()
         buffer = rgb_img.bits()
         arr = np.frombuffer(buffer, dtype=np.uint8).reshape((height, rgb_img.bytesPerLine()))
-        return arr[:, :width * 3].reshape((height, width, 3)).copy()
+        return arr[:, : width * 3].reshape((height, width, 3)).copy()
 
     def qImageToGrayArray(self, img):
         gray_img = img.convertToFormat(QtGui.QImage.Format_Grayscale8)
@@ -569,16 +654,17 @@ class MainWidget(QtWidgets.QMainWindow):
         arr = np.frombuffer(buffer, dtype=np.uint8).reshape((height, gray_img.bytesPerLine()))
         return arr[:, :width].copy()
 
-    def getGuidanceState(self, box_centre_x, image_width):
+    def getGuidanceState(self, box_centre_x: float, image_width: int):
         image_centre_x = image_width / 2
         tolerance = image_width * CENTRE_TOLERANCE_FRACTION
+
         if box_centre_x > image_centre_x + tolerance:
             return "left"
         if box_centre_x < image_centre_x - tolerance:
             return "right"
         return "ok"
 
-    def drawGuidanceIcon(self, painter, output_img, guidance_state):
+    def drawGuidanceIcon(self, painter, output_img, guidance_state: str):
         icon = self.guidance_icons.get(guidance_state)
         icon_size = max(48, int(output_img.width() * GUIDANCE_ICON_SIZE_FRACTION))
         y = output_img.height() - icon_size - GUIDANCE_ICON_MARGIN
@@ -604,8 +690,7 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.setFont(font)
         painter.drawText(QtCore.QRectF(x, y, icon_size, icon_size), QtCore.Qt.AlignCenter, fallback_text)
 
-
-    def clampPoint(self, painter, x, y, margin=6):
+    def clampPoint(self, painter, x, y, margin: int = 6):
         device = painter.device()
         width = device.width() if device is not None else 0
         height = device.height() if device is not None else 0
@@ -621,7 +706,9 @@ class MainWidget(QtWidgets.QMainWindow):
 
         if icon is not None:
             scaled_icon = icon.scaled(icon_size, icon_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-            painter.drawPixmap(x + (icon_size - scaled_icon.width()) // 2, y + (icon_size - scaled_icon.height()) // 2, scaled_icon)
+            draw_x = x + (icon_size - scaled_icon.width()) // 2
+            draw_y = y + (icon_size - scaled_icon.height()) // 2
+            painter.drawPixmap(draw_x, draw_y, scaled_icon)
             return
 
         font = QtGui.QFont()
@@ -631,7 +718,7 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.setPen(QtGui.QPen(QtCore.Qt.white))
         painter.drawText(QtCore.QRectF(x, y, icon_size, icon_size), QtCore.Qt.AlignCenter, "NO DETECTION")
 
-    def drawMeasurementLine(self, painter, start, end, text, text_pos, colour):
+    def drawMeasurementLine(self, painter, start, end, text: str, text_pos, colour):
         line_pen = QtGui.QPen(colour)
         line_pen.setWidth(3)
         painter.setPen(line_pen)
@@ -648,7 +735,7 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.setPen(QtGui.QPen(colour))
         painter.drawText(text_point, text)
 
-    def drawYoloMeasurements(self, painter, x1, y1, x2, y2, microns_per_pixel):
+    def drawYoloMeasurements(self, painter, x1, y1, x2, y2, microns_per_pixel: float):
         if microns_per_pixel <= 0:
             painter.setPen(QtGui.QPen(QtCore.Qt.white))
             painter.drawText(self.clampPoint(painter, x1 + 4, y2 + 22), "Scale unavailable")
@@ -659,7 +746,7 @@ class MainWidget(QtWidgets.QMainWindow):
         height_px = max(0.0, y2 - y1)
         width_mm = width_px * scale_mm
         height_mm = height_px * scale_mm
-        hypotenuse_mm = (width_px ** 2 + height_px ** 2) ** 0.5 * scale_mm
+        hypotenuse_mm = (width_px**2 + height_px**2) ** 0.5 * scale_mm
         centre_x = (x1 + x2) / 2
         centre_y = (y1 + y2) / 2
 
@@ -674,6 +761,7 @@ class MainWidget(QtWidgets.QMainWindow):
         gray = self.qImageToGrayArray(original_img).astype(np.float32) / 255.0
         if self.unet_train_mean is not None and self.unet_train_std not in (None, 0):
             gray = (gray - float(self.unet_train_mean)) / float(self.unet_train_std)
+
         tensor = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).to(self.unet_device)
         return torch_nn_F.interpolate(tensor, size=(self.unet_input_size, self.unet_input_size), mode="bilinear", align_corners=False)
 
@@ -688,6 +776,7 @@ class MainWidget(QtWidgets.QMainWindow):
     def drawSegmentationMask(self, painter, mask):
         if mask is None or mask.size == 0:
             return
+
         height, width = mask.shape
         overlay = np.zeros((height, width, 4), dtype=np.uint8)
         overlay[mask] = [128, 0, 128, UNET_MASK_ALPHA]
@@ -722,9 +811,10 @@ class MainWidget(QtWidgets.QMainWindow):
             "si": (float(xs[top_left_idx]), float(ys[top_left_idx]), float(xs[bottom_right_idx]), float(ys[bottom_right_idx])),
         }
 
-    def drawSegmentationMeasurements(self, painter, geometry, microns_per_pixel):
+    def drawSegmentationMeasurements(self, painter, geometry, microns_per_pixel: float):
         if geometry is None:
             return
+
         if microns_per_pixel <= 0:
             painter.setPen(QtGui.QPen(QtCore.Qt.white))
             painter.drawText(self.clampPoint(painter, 10, 24), "Scale unavailable")
@@ -745,7 +835,7 @@ class MainWidget(QtWidgets.QMainWindow):
         if self.measurements_enabled["SI"]:
             self.drawMeasurementLine(painter, (si_x1, si_y1), (si_x2, si_y2), f"SI {si_mm:.1f} mm", (si_x2 + 8, si_y2 + 22), QtCore.Qt.green)
 
-    def processUnetImageForDisplay(self, original_img, output_img, microns_per_pixel):
+    def processUnetImageForDisplay(self, original_img, output_img, microns_per_pixel: float):
         if self.unet_model is None:
             return output_img
 
@@ -767,7 +857,7 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.end()
         return output_img
 
-    def processYoloImageForDisplay(self, original_img, output_img, microns_per_pixel):
+    def processYoloImageForDisplay(self, original_img, output_img, microns_per_pixel: float):
         if self.yolo_model is None:
             return output_img
 
@@ -817,6 +907,7 @@ class MainWidget(QtWidgets.QMainWindow):
     def getRoiImage(self, original_img):
         if original_img.isNull():
             return original_img
+
         percent = min(max(int(self.roi_percent), ROI_MIN_PERCENT), ROI_MAX_PERCENT)
         width = original_img.width()
         height = original_img.height()
@@ -831,7 +922,7 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.end()
         return padded_img
 
-    def processImageForDisplay(self, original_img, microns_per_pixel):
+    def processImageForDisplay(self, original_img, microns_per_pixel: float):
         roi_img = self.getRoiImage(original_img)
         output_img = roi_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
         if roi_img.isNull():
@@ -843,7 +934,7 @@ class MainWidget(QtWidgets.QMainWindow):
         return output_img
 
     @Slot(bool)
-    def freeze(self, frozen):
+    def freeze(self, frozen: bool):
         if frozen:
             self.run.setText("Run")
             self.statusBar().showMessage("Image Stopped")
@@ -852,13 +943,14 @@ class MainWidget(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Image Running (check firewall settings if no image seen)")
 
     @Slot(int, int)
-    def button(self, btn, clicks):
-        self.statusBar().showMessage(f"Button {btn} pressed w/ {clicks} clicks")
+    def button(self, button: int, clicks: int):
+        self.statusBar().showMessage(f"Button {button} pressed w/ {clicks} clicks")
 
     @Slot(QtGui.QImage, float, int, int)
-    def image(self, img, microns_per_pixel, scan_width, scan_height):
+    def image(self, img, microns_per_pixel: float, scan_width: int, scan_height: int):
         if self.is_shutting_down:
             return
+
         self.latest_microns_per_pixel = microns_per_pixel
         self.latest_scan_width = scan_width
         self.latest_scan_height = scan_height
@@ -872,7 +964,8 @@ class MainWidget(QtWidgets.QMainWindow):
 
     @Slot()
     def shutdown(self):
-        global SHUTTING_DOWN, libcast_handle
+        global LIBCAST_HANDLE, SHUTTING_DOWN
+
         if self.is_shutting_down:
             return
 
@@ -900,26 +993,27 @@ class MainWidget(QtWidgets.QMainWindow):
 
         self.cast = None
 
-        if sys.platform.startswith("linux") and libcast_handle is not None:
+        if sys.platform.startswith("linux") and LIBCAST_HANDLE is not None:
             try:
-                ctypes.CDLL("libc.so.6").dlclose(libcast_handle)
-                libcast_handle = None
+                ctypes.CDLL("libc.so.6").dlclose(LIBCAST_HANDLE)
+                LIBCAST_HANDLE = None
             except Exception as exc:
                 print(f"libcast unload failed: {exc}", file=sys.stderr)
 
         QtWidgets.QApplication.quit()
 
 
-# called when a new processed image is streamed
-# this is the displayable scan-converted ultrasound image
+# Called when a displayable scan-converted ultrasound image is streamed.
 def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angle, imu):
     if SHUTTING_DOWN:
         return
+
     bpp = sz / (width * height)
     if bpp == 4:
         img = QtGui.QImage(image, width, height, QtGui.QImage.Format_ARGB32)
     else:
         img = QtGui.QImage(image, width, height, QtGui.QImage.Format_Grayscale8)
+
     app = QtCore.QCoreApplication.instance()
     if app is not None and not app.closingDown():
         signaller.usimage = img.copy()
@@ -929,7 +1023,7 @@ def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angl
         QtCore.QCoreApplication.postEvent(signaller, ImageEvent())
 
 
-# called when a new raw pre scan-converted image is streamed
+# Called when a raw pre scan-converted image is streamed.
 def newRawImage(image, lines, samples, bps, axial, lateral, timestamp, jpg, rf, angle):
     return
 
