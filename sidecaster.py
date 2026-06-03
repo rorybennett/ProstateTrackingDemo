@@ -8,8 +8,8 @@ from typing import Final
 
 APP_DIR = Path(__file__).resolve().parent
 LIB_DIR = APP_DIR / "libraries"
-MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
-UNET_MODEL_CANDIDATES = [APP_DIR / "models" / "model_best.pth", APP_DIR / "models" / "model_latest.pth", APP_DIR / "model_best.pth", APP_DIR / "model_latest.pth"]
+YOLO_MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
+UNET_MODEL_PATH = APP_DIR / "models" / "unet_phantom_best.pt"
 SRC_DIR = APP_DIR / "src"
 LEFT_ARROW_ICON_PATH = SRC_DIR / "move_left.png"
 RIGHT_ARROW_ICON_PATH = SRC_DIR / "move_right.png"
@@ -402,36 +402,29 @@ class MainWidget(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Failed to initialize")
 
     def loadYoloModel(self):
-        if not MODEL_PATH.exists():
-            self.statusBar().showMessage(f"YOLO model not found: {MODEL_PATH}")
+        if not YOLO_MODEL_PATH.exists():
+            self.statusBar().showMessage(f"YOLO model not found: {YOLO_MODEL_PATH}")
             return None
         try:
-            return YOLO(str(MODEL_PATH))
+            return YOLO(str(YOLO_MODEL_PATH))
         except Exception as exc:
             self.statusBar().showMessage(f"Failed to load YOLO model: {exc}")
             return None
 
-    def findUnetModelPath(self):
-        for path in UNET_MODEL_CANDIDATES:
-            if path.exists():
-                return path
-        return None
 
     def loadUnetModel(self):
         if torch is None or UNet is None:
             self.statusBar().showMessage(f"UNet unavailable: {UNET_IMPORT_ERROR}")
             return None
 
-        model_path = self.findUnetModelPath()
-        if model_path is None:
-            checked = ", ".join(str(path) for path in UNET_MODEL_CANDIDATES)
-            self.statusBar().showMessage(f"UNet model not found. Checked: {checked}")
+        if not UNET_MODEL_PATH.exists():
+            self.statusBar().showMessage(f"UNET model not found: {UNET_MODEL_PATH}")
             return None
 
         try:
             self.unet_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model = UNet().to(self.unet_device)
-            checkpoint = torch.load(str(model_path), map_location=self.unet_device)
+            checkpoint = torch.load(str(UNET_MODEL_PATH), map_location=self.unet_device)
             state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
             model.load_state_dict(state_dict)
