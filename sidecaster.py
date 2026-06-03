@@ -9,6 +9,7 @@ from typing import Final
 APP_DIR = Path(__file__).resolve().parent
 LIB_DIR = APP_DIR / "libraries"
 MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
+UNET_MODEL_CANDIDATES = [APP_DIR / "models" / "model_best.pth", APP_DIR / "models" / "model_latest.pth", APP_DIR / "model_best.pth", APP_DIR / "model_latest.pth"]
 SRC_DIR = APP_DIR / "src"
 LEFT_ARROW_ICON_PATH = SRC_DIR / "move_left.png"
 RIGHT_ARROW_ICON_PATH = SRC_DIR / "move_right.png"
@@ -52,6 +53,17 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Slot
 from ultralytics import YOLO
 
+try:
+    import torch
+    import torch.nn.functional as torch_nn_F
+    from UNet import UNet
+    UNET_IMPORT_ERROR = None
+except Exception as exc:
+    torch = None
+    torch_nn_F = None
+    UNet = None
+    UNET_IMPORT_ERROR = exc
+
 CMD_FREEZE: Final = 1
 CMD_CAPTURE_IMAGE: Final = 2
 CMD_CAPTURE_CINE: Final = 3
@@ -63,6 +75,9 @@ CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
+UNET_INPUT_SIZE: Final = 256
+UNET_THRESHOLD: Final = 0.50
+UNET_MASK_ALPHA: Final = 90
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
@@ -154,6 +169,9 @@ class MainWidget(QtWidgets.QMainWindow):
         self.cast = cast
         self.yolo_model = None
         self.yolo_enabled = True
+        self.unet_model = None
+        self.unet_device = None
+        self.unet_enabled = False
         self.guidance_icons = {}
         self.measurements_enabled = {key: False for key, _ in MEASUREMENT_BUTTONS.values()}
         self.latest_scan_width = 0
@@ -240,18 +258,38 @@ class MainWidget(QtWidgets.QMainWindow):
         def tryToggleYolo(checked):
             self.yolo_enabled = checked
             self.yoloToggleButton.setText("YOLO: On" if checked else "YOLO: Off")
+            if checked:
+                self.unet_enabled = False
+                self.unetToggleButton.blockSignals(True)
+                self.unetToggleButton.setChecked(False)
+                self.unetToggleButton.blockSignals(False)
+                self.unetToggleButton.setText("UNet: Off")
             if checked and self.yolo_model is None:
                 self.statusBar().showMessage("YOLO enabled, but model is not loaded")
             else:
                 self.statusBar().showMessage(f"YOLO detection {'enabled' if checked else 'disabled'}")
+
+        def tryToggleUnet(checked):
+            self.unet_enabled = checked
+            self.unetToggleButton.setText("UNet: On" if checked else "UNet: Off")
+            if checked:
+                self.yolo_enabled = False
+                self.yoloToggleButton.blockSignals(True)
+                self.yoloToggleButton.setChecked(False)
+                self.yoloToggleButton.blockSignals(False)
+                self.yoloToggleButton.setText("YOLO: Off")
+            if checked and self.unet_model is None:
+                self.statusBar().showMessage("UNet enabled, but model is not loaded")
+            else:
+                self.statusBar().showMessage(f"UNet segmentation {'enabled' if checked else 'disabled'}")
 
         def tryToolButton(index, checked=False):
             if index in MEASUREMENT_BUTTONS:
                 key, _ = MEASUREMENT_BUTTONS[index]
                 self.measurements_enabled[key] = checked
                 state = "enabled" if checked else "disabled"
-                if checked and not self.yolo_enabled:
-                    self.statusBar().showMessage(f"{key} measurement enabled, but YOLO is off")
+                if checked and not (self.yolo_enabled or self.unet_enabled):
+                    self.statusBar().showMessage(f"{key} measurement enabled, but YOLO and UNet are off")
                 else:
                     self.statusBar().showMessage(f"{key} measurement {state}")
                 return
@@ -275,16 +313,17 @@ class MainWidget(QtWidgets.QMainWindow):
         self.yoloToggleButton.setChecked(self.yolo_enabled)
         self.yoloToggleButton.clicked.connect(tryToggleYolo)
 
-        self.toolButtons = [self.yoloToggleButton]
-        for index in range(2, 6):
-            if index in MEASUREMENT_BUTTONS:
-                _, label = MEASUREMENT_BUTTONS[index]
-                button = QtWidgets.QPushButton(label)
-                button.setCheckable(True)
-                button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx, checked))
-            else:
-                button = QtWidgets.QPushButton(f"Button {index}")
-                button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx))
+        self.unetToggleButton = QtWidgets.QPushButton("UNet: Off")
+        self.unetToggleButton.setCheckable(True)
+        self.unetToggleButton.setChecked(self.unet_enabled)
+        self.unetToggleButton.clicked.connect(tryToggleUnet)
+
+        self.toolButtons = [self.yoloToggleButton, self.unetToggleButton]
+        for index in range(3, 6):
+            key, label = MEASUREMENT_BUTTONS[index]
+            button = QtWidgets.QPushButton(label)
+            button.setCheckable(True)
+            button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx, checked))
             self.toolButtons.append(button)
 
         self.originalView = ImageView(cast, controls_output_size=True)
@@ -348,14 +387,17 @@ class MainWidget(QtWidgets.QMainWindow):
         signaller.image.connect(self.image)
 
         self.yolo_model = self.loadYoloModel()
+        self.unet_model = self.loadUnetModel()
         self.guidance_icons = self.loadGuidanceIcons()
 
         path = os.path.expanduser("~/")
         if cast.init(path, 640, 480):
-            msg = "Initialized"
+            loaded = []
             if self.yolo_model is not None:
-                msg += " with YOLO"
-            self.statusBar().showMessage(msg)
+                loaded.append("YOLO")
+            if self.unet_model is not None:
+                loaded.append("UNet")
+            self.statusBar().showMessage("Initialized" + (" with " + " and ".join(loaded) if loaded else ""))
         else:
             self.statusBar().showMessage("Failed to initialize")
 
@@ -367,6 +409,36 @@ class MainWidget(QtWidgets.QMainWindow):
             return YOLO(str(MODEL_PATH))
         except Exception as exc:
             self.statusBar().showMessage(f"Failed to load YOLO model: {exc}")
+            return None
+
+    def findUnetModelPath(self):
+        for path in UNET_MODEL_CANDIDATES:
+            if path.exists():
+                return path
+        return None
+
+    def loadUnetModel(self):
+        if torch is None or UNet is None:
+            self.statusBar().showMessage(f"UNet unavailable: {UNET_IMPORT_ERROR}")
+            return None
+
+        model_path = self.findUnetModelPath()
+        if model_path is None:
+            checked = ", ".join(str(path) for path in UNET_MODEL_CANDIDATES)
+            self.statusBar().showMessage(f"UNet model not found. Checked: {checked}")
+            return None
+
+        try:
+            self.unet_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model = UNet().to(self.unet_device)
+            checkpoint = torch.load(str(model_path), map_location=self.unet_device)
+            state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+            state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
+            model.load_state_dict(state_dict)
+            model.eval()
+            return model
+        except Exception as exc:
+            self.statusBar().showMessage(f"Failed to load UNet model: {exc}")
             return None
 
     def loadGuidanceIcons(self):
@@ -385,6 +457,14 @@ class MainWidget(QtWidgets.QMainWindow):
         buffer = rgb_img.bits()
         arr = np.frombuffer(buffer, dtype=np.uint8).reshape((height, rgb_img.bytesPerLine()))
         return arr[:, :width * 3].reshape((height, width, 3)).copy()
+
+    def qImageToGrayArray(self, img):
+        gray_img = img.convertToFormat(QtGui.QImage.Format_Grayscale8)
+        width = gray_img.width()
+        height = gray_img.height()
+        buffer = gray_img.bits()
+        arr = np.frombuffer(buffer, dtype=np.uint8).reshape((height, gray_img.bytesPerLine()))
+        return arr[:, :width].copy()
 
     def getGuidanceState(self, box_centre_x, image_width):
         image_centre_x = image_width / 2
@@ -487,9 +567,103 @@ class MainWidget(QtWidgets.QMainWindow):
         if self.measurements_enabled["SI"]:
             self.drawMeasurementLine(painter, (x1, y1), (x2, y2), f"SI {hypotenuse_mm:.1f} mm", (x2 + 8, y2 + 22), QtCore.Qt.green)
 
-    def processImageForDisplay(self, original_img, microns_per_pixel):
-        output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
-        if original_img.isNull() or not self.yolo_enabled or self.yolo_model is None:
+    def prepareUnetTensor(self, original_img):
+        gray = self.qImageToGrayArray(original_img).astype(np.float32) / 255.0
+        tensor = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).to(self.unet_device)
+        return torch_nn_F.interpolate(tensor, size=(UNET_INPUT_SIZE, UNET_INPUT_SIZE), mode="bilinear", align_corners=False)
+
+    def runUnetMask(self, original_img):
+        tensor = self.prepareUnetTensor(original_img)
+        with torch.no_grad():
+            logits = self.unet_model(tensor)
+            probs = torch.sigmoid(logits)
+            probs = torch_nn_F.interpolate(probs, size=(original_img.height(), original_img.width()), mode="bilinear", align_corners=False)
+        return probs.squeeze().detach().cpu().numpy() >= UNET_THRESHOLD
+
+    def drawSegmentationMask(self, painter, mask):
+        if mask is None or mask.size == 0:
+            return
+        height, width = mask.shape
+        overlay = np.zeros((height, width, 4), dtype=np.uint8)
+        overlay[mask] = [128, 0, 128, UNET_MASK_ALPHA]
+        overlay_img = QtGui.QImage(overlay.data, width, height, width * 4, QtGui.QImage.Format_RGBA8888)
+        painter.drawImage(0, 0, overlay_img)
+
+    def getSegmentationGeometry(self, mask):
+        ys, xs = np.nonzero(mask)
+        if xs.size == 0:
+            return None
+
+        height, width = mask.shape
+        min_x = np.full(height, width, dtype=np.int32)
+        max_x = np.full(height, -1, dtype=np.int32)
+        np.minimum.at(min_x, ys, xs)
+        np.maximum.at(max_x, ys, xs)
+        row_widths = max_x - min_x
+        rl_row = int(np.argmax(row_widths))
+
+        min_y = np.full(width, height, dtype=np.int32)
+        max_y = np.full(width, -1, dtype=np.int32)
+        np.minimum.at(min_y, xs, ys)
+        np.maximum.at(max_y, xs, ys)
+        col_heights = max_y - min_y
+        ap_col = int(np.argmax(col_heights))
+
+        top_left_idx = int(np.argmin(xs + ys))
+        bottom_right_idx = int(np.argmax(xs + ys))
+        return {
+            "rl": (float(min_x[rl_row]), float(rl_row), float(max_x[rl_row]), float(rl_row)),
+            "ap": (float(ap_col), float(min_y[ap_col]), float(ap_col), float(max_y[ap_col])),
+            "si": (float(xs[top_left_idx]), float(ys[top_left_idx]), float(xs[bottom_right_idx]), float(ys[bottom_right_idx])),
+        }
+
+    def drawSegmentationMeasurements(self, painter, geometry, microns_per_pixel):
+        if geometry is None:
+            return
+        if microns_per_pixel <= 0:
+            painter.setPen(QtGui.QPen(QtCore.Qt.white))
+            painter.drawText(self.clampPoint(painter, 10, 24), "Scale unavailable")
+            return
+
+        scale_mm = microns_per_pixel / 1000.0
+        rl_x1, rl_y1, rl_x2, rl_y2 = geometry["rl"]
+        ap_x1, ap_y1, ap_x2, ap_y2 = geometry["ap"]
+        si_x1, si_y1, si_x2, si_y2 = geometry["si"]
+        rl_mm = abs(rl_x2 - rl_x1) * scale_mm
+        ap_mm = abs(ap_y2 - ap_y1) * scale_mm
+        si_mm = ((si_x2 - si_x1) ** 2 + (si_y2 - si_y1) ** 2) ** 0.5 * scale_mm
+
+        if self.measurements_enabled["RL"]:
+            self.drawMeasurementLine(painter, (rl_x1, rl_y1), (rl_x2, rl_y2), f"RL {rl_mm:.1f} mm", (rl_x1 - 110, rl_y1 + 5), QtGui.QColor("dodgerblue"))
+        if self.measurements_enabled["AP"]:
+            self.drawMeasurementLine(painter, (ap_x1, ap_y1), (ap_x2, ap_y2), f"AP {ap_mm:.1f} mm", (ap_x2 - 45, ap_y2 + 24), QtCore.Qt.red)
+        if self.measurements_enabled["SI"]:
+            self.drawMeasurementLine(painter, (si_x1, si_y1), (si_x2, si_y2), f"SI {si_mm:.1f} mm", (si_x2 + 8, si_y2 + 22), QtCore.Qt.green)
+
+    def processUnetImageForDisplay(self, original_img, output_img, microns_per_pixel):
+        if self.unet_model is None:
+            return output_img
+
+        try:
+            mask = self.runUnetMask(original_img)
+        except Exception as exc:
+            self.statusBar().showMessage(f"UNet failed: {exc}")
+            return output_img
+
+        painter = QtGui.QPainter(output_img)
+        if not np.any(mask):
+            self.drawNoDetectionIcon(painter, output_img)
+            painter.end()
+            return output_img
+
+        self.drawSegmentationMask(painter, mask)
+        geometry = self.getSegmentationGeometry(mask)
+        self.drawSegmentationMeasurements(painter, geometry, microns_per_pixel)
+        painter.end()
+        return output_img
+
+    def processYoloImageForDisplay(self, original_img, output_img, microns_per_pixel):
+        if self.yolo_model is None:
             return output_img
 
         try:
@@ -531,10 +705,18 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.drawText(label_pos, label)
 
         self.drawYoloMeasurements(painter, best_x1, best_y1, best_x2, best_y2, microns_per_pixel)
-
         self.drawGuidanceIcon(painter, output_img, guidance_state)
         painter.end()
+        return output_img
 
+    def processImageForDisplay(self, original_img, microns_per_pixel):
+        output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
+        if original_img.isNull():
+            return output_img
+        if self.unet_enabled:
+            return self.processUnetImageForDisplay(original_img, output_img, microns_per_pixel)
+        if self.yolo_enabled:
+            return self.processYoloImageForDisplay(original_img, output_img, microns_per_pixel)
         return output_img
 
     @Slot(bool)
