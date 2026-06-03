@@ -109,6 +109,7 @@ UNET_TRAIN_STD: Final = 0.15056420456784336
 UNET_MASK_ALPHA: Final = 90
 MAX_BOUNDARY_POINTS_PER_FRAME: Final = 10
 MAX_RECORDED_BOUNDARY_POINTS: Final = 5000
+BOUNDARY_RECORDING_FRAME_STRIDE: Final = 5
 
 
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
@@ -443,6 +444,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.boundaryWindow = None
         self.boundary_recording_enabled = False
         self.boundary_recorded_frames = 0
+        self.boundary_seen_frames = 0
         self.boundary_status_message = ""
         self.roi_percent = ROI_DEFAULT_PERCENT
         self.is_shutting_down = False
@@ -754,6 +756,7 @@ class MainWidget(QtWidgets.QMainWindow):
 
         self.boundary_recording_enabled = True
         self.boundary_recorded_frames = 0
+        self.boundary_seen_frames = 0
         self.boundary_status_message = ""
         self.recordBoundariesButton.setText("Stop Recording Boundaries")
         self.showBoundaryWindow(clear=True)
@@ -765,7 +768,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.recordBoundariesButton.setChecked(False)
         self.recordBoundariesButton.blockSignals(False)
         self.recordBoundariesButton.setText("Record Boundaries")
-        self.statusBar().showMessage(f"Stopped boundary recording after {self.boundary_recorded_frames} frames")
+        self.statusBar().showMessage(f"Stopped boundary recording after {self.boundary_recorded_frames} plotted frames from {self.boundary_seen_frames} eligible frames")
 
     def setBoundaryRecordingStatus(self, message: str):
         if message != self.boundary_status_message:
@@ -780,6 +783,10 @@ class MainWidget(QtWidgets.QMainWindow):
             return
         if microns_per_pixel <= 0:
             self.setBoundaryRecordingStatus("Recording paused: scale unavailable")
+            return
+
+        self.boundary_seen_frames += 1
+        if (self.boundary_seen_frames - 1) % BOUNDARY_RECORDING_FRAME_STRIDE != 0:
             return
 
         boundary_pixels = self.getLargestMaskBoundaryPoints(mask)
