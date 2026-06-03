@@ -108,7 +108,9 @@ UNET_LOGIT_THRESHOLD_SCALE: Final = 100
 UNET_TRAIN_MEAN: Final = 0.07007993166086769
 UNET_TRAIN_STD: Final = 0.15056420456784336
 UNET_MASK_ALPHA: Final = 90
-MAX_BOUNDARY_POINTS: Final = 6000
+MAX_BOUNDARY_POINTS_PER_FRAME: Final = 50
+MAX_RECORDED_BOUNDARY_POINTS: Final = 50000
+
 
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
@@ -190,14 +192,15 @@ class BoundaryWindow(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlag(QtCore.Qt.Window, True)
-        self.cloud_entity = None
+        self.points = np.empty((0, 3), dtype=np.float32)
         self.view = Qt3DExtras.Qt3DWindow()
         self.container = QtWidgets.QWidget.createWindowContainer(self.view)
         self.root_entity = Qt3DCore.QEntity()
         self.view.setRootEntity(self.root_entity)
         self.setCentralWidget(self.container)
-        self.setWindowTitle("Recorded Boundary")
+        self.setWindowTitle("Recorded Boundaries")
         self.setupScene()
+        self.setupPointCloud()
 
     def setupScene(self):
         camera = self.view.camera()
@@ -218,49 +221,65 @@ class BoundaryWindow(QtWidgets.QMainWindow):
         light_entity.addComponent(light)
         light_entity.addComponent(light_transform)
 
-    def setPoints(self, points):
+    def setupPointCloud(self):
+        self.cloud_entity = Qt3DCore.QEntity(self.root_entity)
+        self.geometry = Qt3DCore.QGeometry(self.cloud_entity)
+        self.vertex_buffer = Qt3DCore.QBuffer(self.geometry)
+
+        self.position_attribute = Qt3DCore.QAttribute(self.geometry)
+        self.position_attribute.setName(Qt3DCore.QAttribute.defaultPositionAttributeName())
+        self.position_attribute.setVertexBaseType(Qt3DCore.QAttribute.Float)
+        self.position_attribute.setVertexSize(3)
+        self.position_attribute.setAttributeType(Qt3DCore.QAttribute.VertexAttribute)
+        self.position_attribute.setBuffer(self.vertex_buffer)
+        self.position_attribute.setByteStride(3 * 4)
+        self.position_attribute.setCount(0)
+        self.geometry.addAttribute(self.position_attribute)
+
+        self.renderer = Qt3DRender.QGeometryRenderer(self.cloud_entity)
+        self.renderer.setGeometry(self.geometry)
+        self.renderer.setPrimitiveType(Qt3DRender.QGeometryRenderer.Points)
+        self.renderer.setVertexCount(0)
+
+        material = Qt3DExtras.QPhongMaterial(self.cloud_entity)
+        material.setDiffuse(QtGui.QColor("orange"))
+        material.setAmbient(QtGui.QColor("orange"))
+
+        self.cloud_entity.addComponent(self.renderer)
+        self.cloud_entity.addComponent(material)
+        self.cloud_entity.setEnabled(False)
+
+    def clearPoints(self):
+        self.points = np.empty((0, 3), dtype=np.float32)
+        self.vertex_buffer.setData(QtCore.QByteArray())
+        self.position_attribute.setCount(0)
+        self.renderer.setVertexCount(0)
+        self.cloud_entity.setEnabled(False)
+        self.setWindowTitle("Recorded Boundaries - 0 points")
+
+    def appendPoints(self, points):
         points = np.asarray(points, dtype=np.float32)
         if points.ndim != 2 or points.shape[1] != 3 or points.size == 0:
             return
 
-        if self.cloud_entity is not None:
-            self.cloud_entity.setEnabled(False)
-            self.cloud_entity.deleteLater()
+        self.points = points.copy() if self.points.size == 0 else np.vstack((self.points, points))
+        if self.points.shape[0] > MAX_RECORDED_BOUNDARY_POINTS:
+            self.points = self.points[-MAX_RECORDED_BOUNDARY_POINTS:]
 
-        self.cloud_entity = self.createPointCloudEntity(points)
-        self.fitCamera(points)
-        self.setWindowTitle(f"Recorded Boundary - {len(points)} points")
+        self.updatePointCloud()
 
-    def createPointCloudEntity(self, points):
-        entity = Qt3DCore.QEntity(self.root_entity)
-        geometry = Qt3DCore.QGeometry(entity)
-        vertex_buffer = Qt3DCore.QBuffer(geometry)
-        vertex_buffer.setData(QtCore.QByteArray(points.tobytes()))
-
-        position_attribute = Qt3DCore.QAttribute(geometry)
-        position_attribute.setName(Qt3DCore.QAttribute.defaultPositionAttributeName())
-        position_attribute.setVertexBaseType(Qt3DCore.QAttribute.Float)
-        position_attribute.setVertexSize(3)
-        position_attribute.setAttributeType(Qt3DCore.QAttribute.VertexAttribute)
-        position_attribute.setBuffer(vertex_buffer)
-        position_attribute.setByteStride(3 * 4)
-        position_attribute.setCount(points.shape[0])
-        geometry.addAttribute(position_attribute)
-
-        renderer = Qt3DRender.QGeometryRenderer(entity)
-        renderer.setGeometry(geometry)
-        renderer.setPrimitiveType(Qt3DRender.QGeometryRenderer.Points)
-        renderer.setVertexCount(points.shape[0])
-
-        material = Qt3DExtras.QPhongMaterial(entity)
-        material.setDiffuse(QtGui.QColor("orange"))
-        material.setAmbient(QtGui.QColor("orange"))
-
-        entity.addComponent(renderer)
-        entity.addComponent(material)
-        return entity
+    def updatePointCloud(self):
+        self.vertex_buffer.setData(QtCore.QByteArray(self.points.tobytes()))
+        self.position_attribute.setCount(self.points.shape[0])
+        self.renderer.setVertexCount(self.points.shape[0])
+        self.cloud_entity.setEnabled(self.points.shape[0] > 0)
+        self.fitCamera(self.points)
+        self.setWindowTitle(f"Recorded Boundaries - {self.points.shape[0]} points")
 
     def fitCamera(self, points):
+        if points.size == 0:
+            return
+
         centre = points.mean(axis=0)
         spread = float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
         distance = max(80.0, spread * 1.8)
@@ -332,6 +351,9 @@ class MainWidget(QtWidgets.QMainWindow):
         self.latest_has_imu_data = False
 
         self.boundaryWindow = None
+        self.boundary_recording_enabled = False
+        self.boundary_recorded_frames = 0
+        self.boundary_status_message = ""
         self.roi_percent = ROI_DEFAULT_PERCENT
         self.is_shutting_down = False
 
@@ -407,6 +429,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.unetThresholdSlider.setMinimumWidth(180)
 
         self.recordBoundariesButton = QtWidgets.QPushButton("Record Boundaries")
+        self.recordBoundariesButton.setCheckable(True)
         self.recordBoundariesButton.setMinimumWidth(180)
 
     def buildMainLayout(self):
@@ -503,7 +526,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.unetToggleButton.clicked.connect(self.tryToggleUnet)
         self.roiSlider.valueChanged.connect(self.tryRoiChanged)
         self.unetThresholdSlider.valueChanged.connect(self.tryUnetThresholdChanged)
-        self.recordBoundariesButton.clicked.connect(self.tryRecordBoundaries)
+        self.recordBoundariesButton.clicked.connect(self.toggleBoundaryRecording)
 
         signaller.freeze.connect(self.freeze)
         signaller.button.connect(self.button)
@@ -625,34 +648,60 @@ class MainWidget(QtWidgets.QMainWindow):
         if not self.latest_image.isNull():
             self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
 
-    def tryRecordBoundaries(self):
+    def toggleBoundaryRecording(self, checked: bool):
+        if checked:
+            self.startBoundaryRecording()
+        else:
+            self.stopBoundaryRecording()
+
+    def startBoundaryRecording(self):
         if self.unet_model is None:
+            self.recordBoundariesButton.blockSignals(True)
+            self.recordBoundariesButton.setChecked(False)
+            self.recordBoundariesButton.blockSignals(False)
             self.statusBar().showMessage("UNet model is not loaded")
             return
-        if self.latest_image.isNull():
-            self.statusBar().showMessage("No image available to record")
+
+        self.boundary_recording_enabled = True
+        self.boundary_recorded_frames = 0
+        self.boundary_status_message = ""
+        self.recordBoundariesButton.setText("Stop Recording Boundaries")
+        self.showBoundaryWindow(clear=True)
+        self.statusBar().showMessage("Recording boundaries")
+
+    def stopBoundaryRecording(self):
+        self.boundary_recording_enabled = False
+        self.recordBoundariesButton.blockSignals(True)
+        self.recordBoundariesButton.setChecked(False)
+        self.recordBoundariesButton.blockSignals(False)
+        self.recordBoundariesButton.setText("Record Boundaries")
+        self.statusBar().showMessage(f"Stopped boundary recording after {self.boundary_recorded_frames} frames")
+
+    def setBoundaryRecordingStatus(self, message: str):
+        if message != self.boundary_status_message:
+            self.boundary_status_message = message
+            self.statusBar().showMessage(message)
+
+    def recordBoundaryFromMask(self, mask, image_width: int, image_height: int, microns_per_pixel: float):
+        if not self.boundary_recording_enabled:
             return
         if not self.latest_has_imu_data:
-            self.statusBar().showMessage("No IMU orientation available for the latest frame")
+            self.setBoundaryRecordingStatus("Recording paused: no IMU orientation for this frame")
             return
-        if self.latest_microns_per_pixel <= 0:
-            self.statusBar().showMessage("Scale unavailable, cannot create 3D boundary")
+        if microns_per_pixel <= 0:
+            self.setBoundaryRecordingStatus("Recording paused: scale unavailable")
             return
 
-        try:
-            roi_img = self.getRoiImage(self.latest_image)
-            mask = self.runUnetMask(roi_img)
-            boundary_pixels = self.getLargestMaskBoundaryPoints(mask)
-            if boundary_pixels.size == 0:
-                self.statusBar().showMessage("UNet found no mask boundary to record")
-                return
+        boundary_pixels = self.getLargestMaskBoundaryPoints(mask)
+        if boundary_pixels.size == 0:
+            self.setBoundaryRecordingStatus("Recording paused: no UNet mask boundary")
+            return
 
-            local_points = self.boundaryPixelsToLocalPoints(boundary_pixels, roi_img.width(), roi_img.height(), self.latest_microns_per_pixel)
-            points_3d = self.rotateBoundaryPoints(local_points, self.latest_orientation)
-            self.showBoundaryWindow(points_3d)
-            self.statusBar().showMessage(f"Recorded {len(points_3d)} boundary points")
-        except Exception as exc:
-            self.statusBar().showMessage(f"Boundary recording failed: {exc}")
+        local_points = self.boundaryPixelsToLocalPoints(boundary_pixels, image_width, image_height, microns_per_pixel)
+        points_3d = self.rotateBoundaryPoints(local_points, self.latest_orientation)
+        self.appendBoundaryPoints(points_3d)
+        self.boundary_recorded_frames += 1
+        self.setBoundaryRecordingStatus(f"Recording boundaries: {self.boundary_recorded_frames} frames, {len(points_3d)} points added")
 
     def getLargestMaskBoundaryPoints(self, mask):
         component = self.getLargestMaskComponent(mask)
@@ -665,9 +714,9 @@ class MainWidget(QtWidgets.QMainWindow):
         ys, xs = np.nonzero(boundary)
         points = np.column_stack((xs, ys)).astype(np.float32)
 
-        if points.shape[0] > MAX_BOUNDARY_POINTS:
-            step = int(np.ceil(points.shape[0] / MAX_BOUNDARY_POINTS))
-            points = points[::step]
+        if points.shape[0] > MAX_BOUNDARY_POINTS_PER_FRAME:
+            indices = np.linspace(0, points.shape[0] - 1, MAX_BOUNDARY_POINTS_PER_FRAME, dtype=np.int32)
+            points = points[indices]
         return points
 
     def getLargestMaskComponent(self, mask):
@@ -729,15 +778,27 @@ class MainWidget(QtWidgets.QMainWindow):
             rotated[index] = (vector.x(), vector.y(), vector.z())
         return rotated
 
-    def showBoundaryWindow(self, points):
+    def ensureBoundaryWindow(self):
         if self.boundaryWindow is None:
             self.boundaryWindow = BoundaryWindow(self)
             self.boundaryWindow.resize(900, 650)
+        return self.boundaryWindow
 
-        self.boundaryWindow.setPoints(points)
-        self.boundaryWindow.show()
-        self.boundaryWindow.raise_()
-        self.boundaryWindow.activateWindow()
+    def showBoundaryWindow(self, clear: bool = False):
+        window = self.ensureBoundaryWindow()
+
+        if clear:
+            window.clearPoints()
+
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def appendBoundaryPoints(self, points):
+        window = self.ensureBoundaryWindow()
+        if not window.isVisible():
+            window.show()
+        window.appendPoints(points)
 
     def loadYoloModel(self):
         if not YOLO_MODEL_PATH.exists():
@@ -1063,10 +1124,13 @@ class MainWidget(QtWidgets.QMainWindow):
 
         painter = QtGui.QPainter(output_img)
         if not np.any(mask):
+            if self.boundary_recording_enabled:
+                self.setBoundaryRecordingStatus("Recording paused: no UNet mask boundary")
             self.drawNoDetectionIcon(painter, output_img)
             painter.end()
             return output_img
 
+        self.recordBoundaryFromMask(mask, original_img.width(), original_img.height(), microns_per_pixel)
         self.drawSegmentationMask(painter, mask)
         geometry = self.getSegmentationGeometry(mask)
         self.drawSegmentationMeasurements(painter, geometry, microns_per_pixel)
@@ -1143,7 +1207,7 @@ class MainWidget(QtWidgets.QMainWindow):
         output_img = roi_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
         if roi_img.isNull():
             return output_img
-        if self.unet_enabled:
+        if self.unet_enabled or self.boundary_recording_enabled:
             return self.processUnetImageForDisplay(roi_img, output_img, microns_per_pixel)
         if self.yolo_enabled:
             return self.processYoloImageForDisplay(roi_img, output_img, microns_per_pixel)
