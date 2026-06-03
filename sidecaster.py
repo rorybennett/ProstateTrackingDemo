@@ -85,6 +85,9 @@ UNET_MASK_ALPHA: Final = 90
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
+ROI_DEFAULT_PERCENT: Final = 50
+ROI_MIN_PERCENT: Final = 1
+ROI_MAX_PERCENT: Final = 100
 MEASUREMENT_BUTTONS: Final = {3: ("RL", "Calculate RL"), 4: ("AP", "Calculate AP"), 5: ("SI", "Calculate SI")}
 
 
@@ -185,6 +188,8 @@ class MainWidget(QtWidgets.QMainWindow):
         self.latest_scan_width = 0
         self.latest_scan_height = 0
         self.latest_microns_per_pixel = 0.0
+        self.latest_image = QtGui.QImage()
+        self.roi_percent = ROI_DEFAULT_PERCENT
         self.is_shutting_down = False
         self.setWindowTitle("Clarius Cast Dual Display Demo")
 
@@ -303,6 +308,13 @@ class MainWidget(QtWidgets.QMainWindow):
                 return
             self.statusBar().showMessage(f"Tool button {index} pressed")
 
+        def tryRoiChanged(value):
+            self.roi_percent = int(value)
+            self.roiLabel.setText(f"ROI {self.roi_percent}%")
+            if not self.latest_image.isNull():
+                self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
+            self.statusBar().showMessage(f"Processed ROI width set to {self.roi_percent}%")
+
         conn.clicked.connect(tryConnect)
         self.run.clicked.connect(tryFreeze)
         quit.clicked.connect(self.close)
@@ -334,6 +346,16 @@ class MainWidget(QtWidgets.QMainWindow):
             button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx, checked))
             self.toolButtons.append(button)
 
+        self.roiLabel = QtWidgets.QLabel(f"ROI {self.roi_percent}%")
+        self.roiLabel.setAlignment(QtCore.Qt.AlignCenter)
+        self.roiSlider = QtWidgets.QSlider(QtCore.Qt.Vertical)
+        self.roiSlider.setRange(ROI_MIN_PERCENT, ROI_MAX_PERCENT)
+        self.roiSlider.setValue(self.roi_percent)
+        self.roiSlider.setTickInterval(10)
+        self.roiSlider.setTickPosition(QtWidgets.QSlider.TicksRight)
+        self.roiSlider.setMinimumHeight(180)
+        self.roiSlider.valueChanged.connect(tryRoiChanged)
+
         self.originalView = ImageView(cast, controls_output_size=True)
         self.processedView = ImageView()
 
@@ -349,6 +371,8 @@ class MainWidget(QtWidgets.QMainWindow):
         for button in self.toolButtons:
             button.setMinimumWidth(100)
             processedButtonLayout.addWidget(button)
+        processedButtonLayout.addWidget(self.roiLabel)
+        processedButtonLayout.addWidget(self.roiSlider, 1, QtCore.Qt.AlignHCenter)
         processedButtonLayout.addStretch(1)
         processedLayout.addLayout(processedButtonLayout)
         processedGroup.setLayout(processedLayout)
@@ -768,14 +792,23 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.end()
         return output_img
 
-    def processImageForDisplay(self, original_img, microns_per_pixel):
-        output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
+    def getRoiImage(self, original_img):
         if original_img.isNull():
+            return original_img
+        percent = min(max(int(self.roi_percent), ROI_MIN_PERCENT), ROI_MAX_PERCENT)
+        roi_width = max(1, int(round(original_img.width() * percent / 100.0)))
+        x = max(0, (original_img.width() - roi_width) // 2)
+        return original_img.copy(x, 0, roi_width, original_img.height())
+
+    def processImageForDisplay(self, original_img, microns_per_pixel):
+        roi_img = self.getRoiImage(original_img)
+        output_img = roi_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
+        if roi_img.isNull():
             return output_img
         if self.unet_enabled:
-            return self.processUnetImageForDisplay(original_img, output_img, microns_per_pixel)
+            return self.processUnetImageForDisplay(roi_img, output_img, microns_per_pixel)
         if self.yolo_enabled:
-            return self.processYoloImageForDisplay(original_img, output_img, microns_per_pixel)
+            return self.processYoloImageForDisplay(roi_img, output_img, microns_per_pixel)
         return output_img
 
     @Slot(bool)
@@ -798,6 +831,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.latest_microns_per_pixel = microns_per_pixel
         self.latest_scan_width = scan_width
         self.latest_scan_height = scan_height
+        self.latest_image = img.copy()
         self.originalView.updateImage(img)
         self.processedView.updateImage(self.processImageForDisplay(img, microns_per_pixel))
 
