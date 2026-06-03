@@ -78,6 +78,8 @@ YOLO_IMGSZ: Final = 640
 UNET_INPUT_SIZE: Final = 256
 UNET_THRESHOLD: Final = 0.50
 UNET_MASK_ALPHA: Final = 90
+UNET_VALID_PIXEL_THRESHOLD: Final = 3
+UNET_MIN_COMPONENT_AREA: Final = 100
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
@@ -565,13 +567,47 @@ class MainWidget(QtWidgets.QMainWindow):
         tensor = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).to(self.unet_device)
         return torch_nn_F.interpolate(tensor, size=(UNET_INPUT_SIZE, UNET_INPUT_SIZE), mode="bilinear", align_corners=False)
 
+    def getValidScanMask(self, original_img):
+        gray = self.qImageToGrayArray(original_img)
+        raw = gray > UNET_VALID_PIXEL_THRESHOLD
+        if not np.any(raw):
+            return np.ones_like(raw, dtype=bool)
+
+        valid = np.zeros_like(raw, dtype=bool)
+        for y in np.flatnonzero(raw.any(axis=1)):
+            xs = np.flatnonzero(raw[y])
+            valid[y, xs[0]:xs[-1] + 1] = True
+        return valid
+
+    def keepLargestMaskComponent(self, mask):
+        if mask is None or not np.any(mask):
+            return mask
+        try:
+            import cv2
+        except Exception:
+            return mask
+
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+        if count <= 1:
+            return mask
+
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        best = int(np.argmax(areas)) + 1
+        if int(areas[best - 1]) < UNET_MIN_COMPONENT_AREA:
+            return np.zeros_like(mask, dtype=bool)
+        return labels == best
+
     def runUnetMask(self, original_img):
         tensor = self.prepareUnetTensor(original_img)
         with torch.no_grad():
             logits = self.unet_model(tensor)
             probs = torch.sigmoid(logits)
             probs = torch_nn_F.interpolate(probs, size=(original_img.height(), original_img.width()), mode="bilinear", align_corners=False)
-        return probs.squeeze().detach().cpu().numpy() >= UNET_THRESHOLD
+        mask = probs.squeeze().detach().cpu().numpy() >= UNET_THRESHOLD
+        valid_mask = self.getValidScanMask(original_img)
+        if valid_mask.shape == mask.shape:
+            mask &= valid_mask
+        return self.keepLargestMaskComponent(mask)
 
     def drawSegmentationMask(self, painter, mask):
         if mask is None or mask.size == 0:
@@ -579,8 +615,21 @@ class MainWidget(QtWidgets.QMainWindow):
         height, width = mask.shape
         overlay = np.zeros((height, width, 4), dtype=np.uint8)
         overlay[mask] = [128, 0, 128, UNET_MASK_ALPHA]
-        overlay_img = QtGui.QImage(overlay.data, width, height, width * 4, QtGui.QImage.Format_RGBA8888)
+        overlay_img = QtGui.QImage(overlay.data, width, height, width * 4, QtGui.QImage.Format_RGBA8888).copy()
         painter.drawImage(0, 0, overlay_img)
+
+    def clipSegmentationGeometry(self, geometry, width, height):
+        if geometry is None:
+            return None
+
+        x_max = max(0, width - 1)
+        y_max = max(0, height - 1)
+
+        def clip_line(line):
+            x1, y1, x2, y2 = line
+            return (float(np.clip(x1, 0, x_max)), float(np.clip(y1, 0, y_max)), float(np.clip(x2, 0, x_max)), float(np.clip(y2, 0, y_max)))
+
+        return {key: clip_line(line) for key, line in geometry.items()}
 
     def getSegmentationGeometry(self, mask):
         ys, xs = np.nonzero(mask)
@@ -644,13 +693,14 @@ class MainWidget(QtWidgets.QMainWindow):
             return output_img
 
         painter = QtGui.QPainter(output_img)
+        painter.setClipRect(0, 0, output_img.width(), output_img.height())
         if not np.any(mask):
             self.drawNoDetectionIcon(painter, output_img)
             painter.end()
             return output_img
 
         self.drawSegmentationMask(painter, mask)
-        geometry = self.getSegmentationGeometry(mask)
+        geometry = self.clipSegmentationGeometry(self.getSegmentationGeometry(mask), output_img.width(), output_img.height())
         self.drawSegmentationMeasurements(painter, geometry, microns_per_pixel)
         painter.end()
         return output_img
