@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 import ctypes
 import os
 import sys
@@ -7,10 +8,11 @@ from typing import Final
 
 APP_DIR = Path(__file__).resolve().parent
 LIB_DIR = APP_DIR / "libraries"
+MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
 PY_TAG = f"python{sys.version_info.major}{sys.version_info.minor}"
 PY_LIB_DIR = LIB_DIR / PY_TAG
-
 LIB_SEARCH_DIRS = [PY_LIB_DIR, LIB_DIR]
+
 dll_dir_handles = []
 libcast_handle = None
 
@@ -32,7 +34,6 @@ if sys.platform.startswith("win"):
     for lib_dir in LIB_SEARCH_DIRS:
         if lib_dir.exists():
             dll_dir_handles.append(os.add_dll_directory(str(lib_dir)))
-
     ctypes.WinDLL(str(find_lib("cast.dll")))
 
 elif sys.platform.startswith("linux"):
@@ -40,10 +41,10 @@ elif sys.platform.startswith("linux"):
     ctypes.cdll.LoadLibrary(str(find_lib("pyclariuscast.so")))
 
 import pyclariuscast
-
-import pyclariuscast
+import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Slot
+from ultralytics import YOLO
 
 CMD_FREEZE: Final = 1
 CMD_CAPTURE_IMAGE: Final = 2
@@ -54,6 +55,8 @@ CMD_GAIN_DEC: Final = 6
 CMD_GAIN_INC: Final = 7
 CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
+YOLO_CONF: Final = 0.25
+YOLO_IMGSZ: Final = 640
 
 
 class FreezeEvent(QtCore.QEvent):
@@ -134,6 +137,7 @@ class MainWidget(QtWidgets.QMainWindow):
     def __init__(self, cast, parent=None):
         QtWidgets.QMainWindow.__init__(self, parent)
         self.cast = cast
+        self.yolo_model = None
         self.setWindowTitle("Clarius Cast Dual Display Demo")
 
         central = QtWidgets.QWidget()
@@ -278,14 +282,66 @@ class MainWidget(QtWidgets.QMainWindow):
         signaller.button.connect(self.button)
         signaller.image.connect(self.image)
 
+        self.yolo_model = self.loadYoloModel()
+
         path = os.path.expanduser("~/")
         if cast.init(path, 640, 480):
-            self.statusBar().showMessage("Initialized")
+            msg = "Initialized"
+            if self.yolo_model is not None:
+                msg += " with YOLO"
+            self.statusBar().showMessage(msg)
         else:
             self.statusBar().showMessage("Failed to initialize")
 
+    def loadYoloModel(self):
+        if not MODEL_PATH.exists():
+            self.statusBar().showMessage(f"YOLO model not found: {MODEL_PATH}")
+            return None
+        try:
+            return YOLO(str(MODEL_PATH))
+        except Exception as exc:
+            self.statusBar().showMessage(f"Failed to load YOLO model: {exc}")
+            return None
+
+    def qImageToRgbArray(self, img):
+        rgb_img = img.convertToFormat(QtGui.QImage.Format_RGB888)
+        width = rgb_img.width()
+        height = rgb_img.height()
+        buffer = rgb_img.bits()
+        arr = np.frombuffer(buffer, dtype=np.uint8).reshape((height, rgb_img.bytesPerLine()))
+        return arr[:, :width * 3].reshape((height, width, 3)).copy()
+
     def processImageForDisplay(self, original_img):
-        return original_img.copy()
+        output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
+        if self.yolo_model is None or original_img.isNull():
+            return output_img
+
+        try:
+            frame = self.qImageToRgbArray(original_img)
+            results = self.yolo_model.predict(frame, conf=YOLO_CONF, imgsz=YOLO_IMGSZ, verbose=False)
+        except Exception as exc:
+            self.statusBar().showMessage(f"YOLO failed: {exc}")
+            return output_img
+
+        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+            return output_img
+
+        boxes = results[0].boxes
+        best_idx = int(boxes.conf.argmax().item())
+        x1, y1, x2, y2 = boxes.xyxy[best_idx].tolist()
+        conf = float(boxes.conf[best_idx].item())
+        cls_id = int(boxes.cls[best_idx].item()) if boxes.cls is not None else None
+        label = f"{self.yolo_model.names.get(cls_id, cls_id)} {conf:.2f}" if cls_id is not None else f"{conf:.2f}"
+
+        painter = QtGui.QPainter(output_img)
+        pen = QtGui.QPen(QtCore.Qt.green)
+        pen.setWidth(3)
+        painter.setPen(pen)
+        painter.drawRect(QtCore.QRectF(x1, y1, x2 - x1, y2 - y1))
+        painter.drawText(QtCore.QPointF(x1 + 4, max(16, y1 - 6)), label)
+        painter.end()
+
+        return output_img
 
     @Slot(bool)
     def freeze(self, frozen):
