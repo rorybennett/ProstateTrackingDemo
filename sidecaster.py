@@ -79,6 +79,9 @@ YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
 UNET_INPUT_SIZE: Final = 600
 UNET_LOGIT_THRESHOLD: Final = 0.50
+UNET_LOGIT_THRESHOLD_MIN: Final = 0.00
+UNET_LOGIT_THRESHOLD_MAX: Final = 1.00
+UNET_LOGIT_THRESHOLD_SCALE: Final = 100
 UNET_TRAIN_MEAN: Final = None
 UNET_TRAIN_STD: Final = None
 UNET_MASK_ALPHA: Final = 90
@@ -315,6 +318,13 @@ class MainWidget(QtWidgets.QMainWindow):
                 self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
             self.statusBar().showMessage(f"Processed ROI width set to {self.roi_percent}%")
 
+        def tryUnetThresholdChanged(value):
+            self.unet_logit_threshold = float(value) / UNET_LOGIT_THRESHOLD_SCALE
+            self.unetThresholdLabel.setText(f"UNet Threshold {self.unet_logit_threshold:.2f}")
+            if not self.latest_image.isNull():
+                self.processedView.updateImage(self.processImageForDisplay(self.latest_image, self.latest_microns_per_pixel))
+            self.statusBar().showMessage(f"UNet logit threshold set to {self.unet_logit_threshold:.2f}")
+
         conn.clicked.connect(tryConnect)
         self.run.clicked.connect(tryFreeze)
         quit.clicked.connect(self.close)
@@ -348,13 +358,23 @@ class MainWidget(QtWidgets.QMainWindow):
 
         self.roiLabel = QtWidgets.QLabel(f"ROI {self.roi_percent}%")
         self.roiLabel.setAlignment(QtCore.Qt.AlignCenter)
-        self.roiSlider = QtWidgets.QSlider(QtCore.Qt.Vertical)
+        self.roiSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.roiSlider.setRange(ROI_MIN_PERCENT, ROI_MAX_PERCENT)
         self.roiSlider.setValue(self.roi_percent)
         self.roiSlider.setTickInterval(10)
-        self.roiSlider.setTickPosition(QtWidgets.QSlider.TicksRight)
-        self.roiSlider.setMinimumHeight(180)
+        self.roiSlider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.roiSlider.setMinimumWidth(180)
         self.roiSlider.valueChanged.connect(tryRoiChanged)
+
+        self.unetThresholdLabel = QtWidgets.QLabel(f"UNet Threshold {self.unet_logit_threshold:.2f}")
+        self.unetThresholdLabel.setAlignment(QtCore.Qt.AlignCenter)
+        self.unetThresholdSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.unetThresholdSlider.setRange(int(UNET_LOGIT_THRESHOLD_MIN * UNET_LOGIT_THRESHOLD_SCALE), int(UNET_LOGIT_THRESHOLD_MAX * UNET_LOGIT_THRESHOLD_SCALE))
+        self.unetThresholdSlider.setValue(int(round(self.unet_logit_threshold * UNET_LOGIT_THRESHOLD_SCALE)))
+        self.unetThresholdSlider.setTickInterval(10)
+        self.unetThresholdSlider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.unetThresholdSlider.setMinimumWidth(180)
+        self.unetThresholdSlider.valueChanged.connect(tryUnetThresholdChanged)
 
         self.originalView = ImageView(cast, controls_output_size=True)
         self.processedView = ImageView()
@@ -372,7 +392,9 @@ class MainWidget(QtWidgets.QMainWindow):
             button.setMinimumWidth(100)
             processedButtonLayout.addWidget(button)
         processedButtonLayout.addWidget(self.roiLabel)
-        processedButtonLayout.addWidget(self.roiSlider, 1, QtCore.Qt.AlignHCenter)
+        processedButtonLayout.addWidget(self.roiSlider)
+        processedButtonLayout.addWidget(self.unetThresholdLabel)
+        processedButtonLayout.addWidget(self.unetThresholdSlider)
         processedButtonLayout.addStretch(1)
         processedLayout.addLayout(processedButtonLayout)
         processedGroup.setLayout(processedLayout)
