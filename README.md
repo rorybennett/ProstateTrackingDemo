@@ -1,89 +1,79 @@
-# Clarius Cast Dual Display Demo
+# Clarius Cast Sidecaster
 
-A small Python/PySide6 demo application for connecting to a Clarius scanner using the Clarius Cast libraries.
+Minimal PySide6 app for streaming Clarius ultrasound and showing two views:
 
-The app shows two ultrasound image panels:
+- **Original ultrasound image**
+- **Processed image** with YOLO detection or UNet segmentation
 
-- **Original ultrasound image** – the image received from the scanner
-- **Processed image** – currently a copy of the original image, but this is where custom processing can be added
+`sidecaster.py` imports the UNet model from `UNet.py`.
 
-## Project structure
+## Expected layout
+
+`sidecaster.py` treats its parent directory as the asset directory:
 
 ```text
-.
-├── sidecaster.py
-├── scanner.mtl
-└── libraries/
-    ├── pyclariuscast.*
-    ├── cast.dll          # Windows
-    ├── libcast.so        # Linux
-    └── pyclariuscast.so  # Linux
+<asset-dir>/
+├── libraries/
+│   ├── cast.dll              # Windows
+│   ├── libcast.so            # Linux
+│   └── pyclariuscast.so      # Linux
+├── models/
+│   ├── yolo_x_phantom_best.pt
+│   ├── unet_phantom_latest.pth
+│   └── training_parameters.txt   # optional
+└── <app-dir>/
+    ├── sidecaster.py
+    ├── UNet.py
+    └── src/                  # optional guidance icons
 ```
-
-The required Clarius Cast library files must be placed in the `libraries` subdirectory next to `sidecaster.py`.
 
 ## Requirements
 
 - Python 3
 - PySide6
-- Clarius Cast library files in `libraries/`
-- A Clarius scanner available on the network
-
-Install the Python dependency with:
+- NumPy
+- Ultralytics
+- PyTorch
+- Clarius Cast library files
+- Clarius scanner on the network
 
 ```bash
-pip install PySide6
+pip install PySide6 numpy ultralytics torch
 ```
 
-## Running the app
-
-From the project directory, run:
+## Run
 
 ```bash
 python sidecaster.py
 ```
 
-The default connection settings are:
+Default connection:
 
-- IP address: `192.168.1.1`
-- Port: `5828`
+```text
+IP:   192.168.1.1
+Port: 5828
+```
 
-Change these in the app window if needed, then click **Connect**.
+Click **Connect**, then **Run**.
 
-## Controls
+## Main controls
 
-- **Connect / Disconnect** – connect to or disconnect from the scanner
-- **Run / Freeze** – start or freeze the live image stream
-- **Depth** – increase or decrease imaging depth
-- **Gain** – increase or decrease image gain
-- **Capture Image** – trigger image capture on the scanner
-- **Capture Movie** – trigger cine/movie capture on the scanner
-- **Save Local** – save the current original and processed images locally
-- **B Mode** – switch to B-mode imaging
-- **Color Mode** – switch to colour flow imaging
+- **YOLO / UNet** – choose detection or segmentation
+- **ROI** – limit processing to the centre of the image
+- **UNet Threshold** – adjust the segmentation threshold
+- **RL / AP / SI** – show measurements on the processed image
+- **Record Boundaries** – plot UNet boundary points in 3D when IMU data is available
+- **Save Local** – save current original and processed images
 
-Saved local images are written to:
+Saved images:
 
 ```text
 ~/Pictures/clarius_original_image.png
 ~/Pictures/clarius_processed_image.png
 ```
 
-## Adding image processing
-
-Custom image processing can be added in `processImageForDisplay()` inside `sidecaster.py`.
-
-At the moment it simply returns a copy of the original image:
-
-```python
-def processImageForDisplay(self, original_img):
-    return original_img.copy()
-```
-
-Modify this function to update what is shown in the processed image panel.
-
 ## Notes
 
-- On Windows, the app loads `cast.dll` from the `libraries` directory.
-- On Linux, the app loads `libcast.so` and `pyclariuscast.so` from the `libraries` directory.
-- If the app connects but no image is visible, check firewall and network settings.
+- YOLO and UNet are mutually exclusive in the processed view.
+- UNet uses `models/unet_phantom_latest.pth` and the architecture in `UNet.py`.
+- If the app connects but no image appears, check firewall and network settings.
