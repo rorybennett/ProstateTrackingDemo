@@ -8,8 +8,8 @@ from typing import Final
 
 APP_DIR = Path(__file__).resolve().parent
 LIB_DIR = APP_DIR / "libraries"
-YOLO_MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pth"
-UNET_MODEL_PATH = APP_DIR / "models" / "unet_phantom_best.pt"
+YOLO_MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
+UNET_MODEL_PATH = APP_DIR / "models" / "unet_phantom_best.pth"
 SRC_DIR = APP_DIR / "src"
 LEFT_ARROW_ICON_PATH = SRC_DIR / "move_left.png"
 RIGHT_ARROW_ICON_PATH = SRC_DIR / "move_right.png"
