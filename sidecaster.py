@@ -62,9 +62,10 @@ CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
-CENTRE_TOLERANCE_FRACTION: Final = 0.08
+CENTRE_TOLERANCE_FRACTION: Final = 0.4
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
+MEASUREMENT_BUTTONS: Final = {3: ("RL", "Calculate RL"), 4: ("AP", "Calculate AP"), 5: ("SI", "Calculate SI")}
 
 
 class FreezeEvent(QtCore.QEvent):
@@ -88,11 +89,14 @@ class ImageEvent(QtCore.QEvent):
 class Signaller(QtCore.QObject):
     freeze = QtCore.Signal(bool)
     button = QtCore.Signal(int, int)
-    image = QtCore.Signal(QtGui.QImage)
+    image = QtCore.Signal(QtGui.QImage, float, int, int)
 
     def __init__(self):
         QtCore.QObject.__init__(self)
         self.usimage = QtGui.QImage()
+        self.microns_per_pixel = 0.0
+        self.scan_width = 0
+        self.scan_height = 0
 
     def event(self, evt):
         if SHUTTING_DOWN:
@@ -102,7 +106,7 @@ class Signaller(QtCore.QObject):
         elif evt.type() == QtCore.QEvent.Type(QtCore.QEvent.User + 1):
             self.button.emit(evt.btn, evt.clicks)
         elif evt.type() == QtCore.QEvent.Type(QtCore.QEvent.User + 2):
-            self.image.emit(self.usimage)
+            self.image.emit(self.usimage, self.microns_per_pixel, self.scan_width, self.scan_height)
         return True
 
 
@@ -150,6 +154,10 @@ class MainWidget(QtWidgets.QMainWindow):
         self.yolo_model = None
         self.yolo_enabled = True
         self.guidance_icons = {}
+        self.measurements_enabled = {key: False for key, _ in MEASUREMENT_BUTTONS.values()}
+        self.latest_scan_width = 0
+        self.latest_scan_height = 0
+        self.latest_microns_per_pixel = 0.0
         self.is_shutting_down = False
         self.setWindowTitle("Clarius Cast Dual Display Demo")
 
@@ -236,7 +244,16 @@ class MainWidget(QtWidgets.QMainWindow):
             else:
                 self.statusBar().showMessage(f"YOLO detection {'enabled' if checked else 'disabled'}")
 
-        def tryToolButton(index):
+        def tryToolButton(index, checked=False):
+            if index in MEASUREMENT_BUTTONS:
+                key, _ = MEASUREMENT_BUTTONS[index]
+                self.measurements_enabled[key] = checked
+                state = "enabled" if checked else "disabled"
+                if checked and not self.yolo_enabled:
+                    self.statusBar().showMessage(f"{key} measurement enabled, but YOLO is off")
+                else:
+                    self.statusBar().showMessage(f"{key} measurement {state}")
+                return
             self.statusBar().showMessage(f"Tool button {index} pressed")
 
         conn.clicked.connect(tryConnect)
@@ -259,8 +276,14 @@ class MainWidget(QtWidgets.QMainWindow):
 
         self.toolButtons = [self.yoloToggleButton]
         for index in range(2, 6):
-            button = QtWidgets.QPushButton(f"Button {index}")
-            button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx))
+            if index in MEASUREMENT_BUTTONS:
+                _, label = MEASUREMENT_BUTTONS[index]
+                button = QtWidgets.QPushButton(label)
+                button.setCheckable(True)
+                button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx, checked))
+            else:
+                button = QtWidgets.QPushButton(f"Button {index}")
+                button.clicked.connect(lambda checked=False, idx=index: tryToolButton(idx))
             self.toolButtons.append(button)
 
         self.originalView = ImageView(cast, controls_output_size=True)
@@ -397,7 +420,47 @@ class MainWidget(QtWidgets.QMainWindow):
         painter.setFont(font)
         painter.drawText(QtCore.QRectF(x, y, icon_size, icon_size), QtCore.Qt.AlignCenter, fallback_text)
 
-    def processImageForDisplay(self, original_img):
+
+    def drawMeasurementLine(self, painter, start, end, text, text_offset):
+        line_pen = QtGui.QPen(QtCore.Qt.yellow)
+        line_pen.setWidth(3)
+        painter.setPen(line_pen)
+        painter.drawLine(QtCore.QPointF(*start), QtCore.QPointF(*end))
+
+        font = QtGui.QFont()
+        font.setBold(True)
+        font.setPointSize(14)
+        painter.setFont(font)
+
+        text_x = (start[0] + end[0]) / 2 + text_offset[0]
+        text_y = (start[1] + end[1]) / 2 + text_offset[1]
+        painter.setPen(QtGui.QPen(QtCore.Qt.black))
+        painter.drawText(QtCore.QPointF(text_x + 1, text_y + 1), text)
+        painter.setPen(QtGui.QPen(QtCore.Qt.yellow))
+        painter.drawText(QtCore.QPointF(text_x, text_y), text)
+
+    def drawYoloMeasurements(self, painter, x1, y1, x2, y2, microns_per_pixel):
+        if microns_per_pixel <= 0:
+            painter.drawText(QtCore.QPointF(x1 + 4, y2 + 22), "Scale unavailable")
+            return
+
+        scale_mm = microns_per_pixel / 1000.0
+        width_px = max(0.0, x2 - x1)
+        height_px = max(0.0, y2 - y1)
+        width_mm = width_px * scale_mm
+        height_mm = height_px * scale_mm
+        hypotenuse_mm = (width_px ** 2 + height_px ** 2) ** 0.5 * scale_mm
+        centre_x = (x1 + x2) / 2
+        centre_y = (y1 + y2) / 2
+
+        if self.measurements_enabled["RL"]:
+            self.drawMeasurementLine(painter, (x1, centre_y), (x2, centre_y), f"RL {width_mm:.1f} mm", (4, -8))
+        if self.measurements_enabled["AP"]:
+            self.drawMeasurementLine(painter, (centre_x, y1), (centre_x, y2), f"AP {height_mm:.1f} mm", (8, 4))
+        if self.measurements_enabled["SI"]:
+            self.drawMeasurementLine(painter, (x1, y1), (x2, y2), f"SI {hypotenuse_mm:.1f} mm", (8, -8))
+
+    def processImageForDisplay(self, original_img, microns_per_pixel):
         output_img = original_img.copy().convertToFormat(QtGui.QImage.Format_ARGB32)
         if original_img.isNull() or not self.yolo_enabled or self.yolo_model is None:
             return output_img
@@ -414,21 +477,20 @@ class MainWidget(QtWidgets.QMainWindow):
 
         boxes = results[0].boxes
         best_idx = int(boxes.conf.argmax().item())
-        best_x1, _, best_x2, _ = boxes.xyxy[best_idx].tolist()
+        best_x1, best_y1, best_x2, best_y2 = boxes.xyxy[best_idx].tolist()
         guidance_state = self.getGuidanceState((best_x1 + best_x2) / 2, output_img.width())
 
         painter = QtGui.QPainter(output_img)
         pen = QtGui.QPen(QtCore.Qt.green)
-        pen.setWidth(3)
+        pen.setWidth(5)
         painter.setPen(pen)
 
-        for index in range(len(boxes)):
-            x1, y1, x2, y2 = boxes.xyxy[index].tolist()
-            conf = float(boxes.conf[index].item())
-            cls_id = int(boxes.cls[index].item()) if boxes.cls is not None else None
-            label = f"{self.yolo_model.names.get(cls_id, cls_id)} {conf:.2f}" if cls_id is not None else f"{conf:.2f}"
-            painter.drawRect(QtCore.QRectF(x1, y1, x2 - x1, y2 - y1))
-            painter.drawText(QtCore.QPointF(x1 + 4, max(16, y1 - 6)), label)
+        conf = float(boxes.conf[best_idx].item())
+        cls_id = int(boxes.cls[best_idx].item()) if boxes.cls is not None else None
+        label = f"{self.yolo_model.names.get(cls_id, cls_id)} {conf:.2f}" if cls_id is not None else f"{conf:.2f}"
+        painter.drawRect(QtCore.QRectF(best_x1, best_y1, best_x2 - best_x1, best_y2 - best_y1))
+        painter.drawText(QtCore.QPointF(best_x1 + 4, max(16, best_y1 - 6)), label)
+        self.drawYoloMeasurements(painter, best_x1, best_y1, best_x2, best_y2, microns_per_pixel)
 
         self.drawGuidanceIcon(painter, output_img, guidance_state)
         painter.end()
@@ -448,12 +510,15 @@ class MainWidget(QtWidgets.QMainWindow):
     def button(self, btn, clicks):
         self.statusBar().showMessage(f"Button {btn} pressed w/ {clicks} clicks")
 
-    @Slot(QtGui.QImage)
-    def image(self, img):
+    @Slot(QtGui.QImage, float, int, int)
+    def image(self, img, microns_per_pixel, scan_width, scan_height):
         if self.is_shutting_down:
             return
+        self.latest_microns_per_pixel = microns_per_pixel
+        self.latest_scan_width = scan_width
+        self.latest_scan_height = scan_height
         self.originalView.updateImage(img)
-        self.processedView.updateImage(self.processImageForDisplay(img))
+        self.processedView.updateImage(self.processImageForDisplay(img, microns_per_pixel))
 
     def closeEvent(self, evt):
         self.shutdown()
@@ -512,6 +577,9 @@ def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angl
     app = QtCore.QCoreApplication.instance()
     if app is not None and not app.closingDown():
         signaller.usimage = img.copy()
+        signaller.microns_per_pixel = float(micronsPerPixel)
+        signaller.scan_width = int(width)
+        signaller.scan_height = int(height)
         QtCore.QCoreApplication.postEvent(signaller, ImageEvent())
 
 
