@@ -68,9 +68,6 @@ load_platform_libraries()
 import numpy as np
 import pyclariuscast
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.Qt3DCore import Qt3DCore
-from PySide6.Qt3DExtras import Qt3DExtras
-from PySide6.Qt3DRender import Qt3DRender
 from PySide6.QtCore import Slot
 from PySide6.QtGui import QQuaternion, QVector3D
 from ultralytics import YOLO
@@ -108,8 +105,8 @@ UNET_LOGIT_THRESHOLD_SCALE: Final = 100
 UNET_TRAIN_MEAN: Final = 0.07007993166086769
 UNET_TRAIN_STD: Final = 0.15056420456784336
 UNET_MASK_ALPHA: Final = 90
-MAX_BOUNDARY_POINTS_PER_FRAME: Final = 50
-MAX_RECORDED_BOUNDARY_POINTS: Final = 50000
+MAX_BOUNDARY_POINTS_PER_FRAME: Final = 10
+MAX_RECORDED_BOUNDARY_POINTS: Final = 5000
 
 
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
@@ -188,74 +185,26 @@ signaller = Signaller()
 
 
 
-class BoundaryWindow(QtWidgets.QMainWindow):
+class BoundaryView(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowFlag(QtCore.Qt.Window, True)
         self.points = np.empty((0, 3), dtype=np.float32)
-        self.view = Qt3DExtras.Qt3DWindow()
-        self.container = QtWidgets.QWidget.createWindowContainer(self.view)
-        self.root_entity = Qt3DCore.QEntity()
-        self.view.setRootEntity(self.root_entity)
-        self.setCentralWidget(self.container)
-        self.setWindowTitle("Recorded Boundaries")
-        self.setupScene()
-        self.setupPointCloud()
-
-    def setupScene(self):
-        camera = self.view.camera()
-        camera.lens().setPerspectiveProjection(45, 16 / 9, 0.1, 10000)
-        camera.setPosition(QVector3D(0, -120, 80))
-        camera.setViewCenter(QVector3D(0, 0, 0))
-
-        controller = Qt3DExtras.QOrbitCameraController(self.root_entity)
-        controller.setLinearSpeed(80)
-        controller.setLookSpeed(180)
-        controller.setCamera(camera)
-
-        light_entity = Qt3DCore.QEntity(self.root_entity)
-        light = Qt3DRender.QPointLight(light_entity)
-        light.setIntensity(1.0)
-        light_transform = Qt3DCore.QTransform()
-        light_transform.setTranslation(QVector3D(0, -80, 120))
-        light_entity.addComponent(light)
-        light_entity.addComponent(light_transform)
-
-    def setupPointCloud(self):
-        self.cloud_entity = Qt3DCore.QEntity(self.root_entity)
-        self.geometry = Qt3DCore.QGeometry(self.cloud_entity)
-        self.vertex_buffer = Qt3DCore.QBuffer(self.geometry)
-
-        self.position_attribute = Qt3DCore.QAttribute(self.geometry)
-        self.position_attribute.setName(Qt3DCore.QAttribute.defaultPositionAttributeName())
-        self.position_attribute.setVertexBaseType(Qt3DCore.QAttribute.Float)
-        self.position_attribute.setVertexSize(3)
-        self.position_attribute.setAttributeType(Qt3DCore.QAttribute.VertexAttribute)
-        self.position_attribute.setBuffer(self.vertex_buffer)
-        self.position_attribute.setByteStride(3 * 4)
-        self.position_attribute.setCount(0)
-        self.geometry.addAttribute(self.position_attribute)
-
-        self.renderer = Qt3DRender.QGeometryRenderer(self.cloud_entity)
-        self.renderer.setGeometry(self.geometry)
-        self.renderer.setPrimitiveType(Qt3DRender.QGeometryRenderer.Points)
-        self.renderer.setVertexCount(0)
-
-        material = Qt3DExtras.QPhongMaterial(self.cloud_entity)
-        material.setDiffuse(QtGui.QColor("orange"))
-        material.setAmbient(QtGui.QColor("orange"))
-
-        self.cloud_entity.addComponent(self.renderer)
-        self.cloud_entity.addComponent(material)
-        self.cloud_entity.setEnabled(False)
+        self.view_centre = np.zeros(3, dtype=np.float32)
+        self.fit_scale = 1.0
+        self.yaw = 0.0
+        self.pitch = -25.0
+        self.zoom = 1.0
+        self.auto_centre = True
+        self.last_mouse_pos = None
+        self.setMinimumSize(720, 520)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
     def clearPoints(self):
         self.points = np.empty((0, 3), dtype=np.float32)
-        self.vertex_buffer.setData(QtCore.QByteArray())
-        self.position_attribute.setCount(0)
-        self.renderer.setVertexCount(0)
-        self.cloud_entity.setEnabled(False)
-        self.setWindowTitle("Recorded Boundaries - 0 points")
+        self.view_centre = np.zeros(3, dtype=np.float32)
+        self.fit_scale = 1.0
+        self.zoom = 1.0
+        self.update()
 
     def appendPoints(self, points):
         points = np.asarray(points, dtype=np.float32)
@@ -265,27 +214,166 @@ class BoundaryWindow(QtWidgets.QMainWindow):
         self.points = points.copy() if self.points.size == 0 else np.vstack((self.points, points))
         if self.points.shape[0] > MAX_RECORDED_BOUNDARY_POINTS:
             self.points = self.points[-MAX_RECORDED_BOUNDARY_POINTS:]
+        if self.auto_centre:
+            self.centreOnPoints(update=False)
+        self.update()
 
-        self.updatePointCloud()
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), QtCore.Qt.black)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        self.drawHelpText(painter)
 
-    def updatePointCloud(self):
-        self.vertex_buffer.setData(QtCore.QByteArray(self.points.tobytes()))
-        self.position_attribute.setCount(self.points.shape[0])
-        self.renderer.setVertexCount(self.points.shape[0])
-        self.cloud_entity.setEnabled(self.points.shape[0] > 0)
-        self.fitCamera(self.points)
-        self.setWindowTitle(f"Recorded Boundaries - {self.points.shape[0]} points")
-
-    def fitCamera(self, points):
-        if points.size == 0:
+        if self.points.size == 0:
+            painter.setPen(QtGui.QPen(QtCore.Qt.white))
+            painter.drawText(self.rect(), QtCore.Qt.AlignCenter, "No boundary points yet")
             return
 
-        centre = points.mean(axis=0)
-        spread = float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
-        distance = max(80.0, spread * 1.8)
-        camera = self.view.camera()
-        camera.setViewCenter(QVector3D(float(centre[0]), float(centre[1]), float(centre[2])))
-        camera.setPosition(QVector3D(float(centre[0]), float(centre[1] - distance), float(centre[2] + distance * 0.6)))
+        projected = self.projectPoints(self.points)
+        self.drawAxes(painter)
+        pen = QtGui.QPen(QtGui.QColor("orange"))
+        pen.setWidth(4)
+        painter.setPen(pen)
+        painter.drawPoints(QtGui.QPolygonF([QtCore.QPointF(float(x), float(y)) for x, y in projected]))
+
+    def drawHelpText(self, painter):
+        centre_state = "auto-centre on" if self.auto_centre else "auto-centre off"
+        painter.setPen(QtGui.QPen(QtCore.Qt.white))
+        painter.drawText(12, 22, f"{self.points.shape[0]} points | {centre_state} | drag rotate | wheel zoom | R reset | C centre")
+
+    def drawAxes(self, painter):
+        if self.points.size == 0:
+            return
+
+        length = max(10.0, self.getSpread() * 0.25)
+        axes = np.array([
+            [0, 0, 0], [length, 0, 0],
+            [0, 0, 0], [0, length, 0],
+            [0, 0, 0], [0, 0, length],
+        ], dtype=np.float32) + self.view_centre
+        projected = self.projectPoints(axes)
+        colours = (QtCore.Qt.red, QtCore.Qt.green, QtCore.Qt.blue)
+        labels = ("X", "Y", "Z")
+
+        for index, colour in enumerate(colours):
+            start = projected[index * 2]
+            end = projected[index * 2 + 1]
+            painter.setPen(QtGui.QPen(colour, 2))
+            painter.drawLine(QtCore.QPointF(float(start[0]), float(start[1])), QtCore.QPointF(float(end[0]), float(end[1])))
+            painter.drawText(QtCore.QPointF(float(end[0]) + 4, float(end[1]) - 4), labels[index])
+
+    def projectPoints(self, points):
+        points = np.asarray(points, dtype=np.float32)
+        centred = points - self.view_centre
+        rotated = centred @ self.rotationMatrix().T
+        scale = self.fit_scale * self.zoom
+        x = self.width() / 2.0 + rotated[:, 0] * scale
+        y = self.height() / 2.0 - rotated[:, 1] * scale
+        return np.column_stack((x, y))
+
+    def rotationMatrix(self):
+        yaw = np.deg2rad(self.yaw)
+        pitch = np.deg2rad(self.pitch)
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=np.float32)
+        rx = np.array([[1, 0, 0], [0, cp, -sp], [0, sp, cp]], dtype=np.float32)
+        return rx @ rz
+
+    def centreOnPoints(self, update=True):
+        if self.points.size == 0:
+            self.view_centre = np.zeros(3, dtype=np.float32)
+            self.fit_scale = 1.0
+            if update:
+                self.update()
+            return
+
+        mins = self.points.min(axis=0)
+        maxs = self.points.max(axis=0)
+        self.view_centre = ((mins + maxs) * 0.5).astype(np.float32)
+        self.fit_scale = self.calculateFitScale()
+        if update:
+            self.update()
+
+    def calculateFitScale(self):
+        if self.points.size == 0:
+            return 1.0
+
+        rotated = (self.points - self.view_centre) @ self.rotationMatrix().T
+        span_x = max(1.0, float(rotated[:, 0].max() - rotated[:, 0].min()))
+        span_y = max(1.0, float(rotated[:, 1].max() - rotated[:, 1].min()))
+        usable_width = max(1.0, self.width() * 0.86)
+        usable_height = max(1.0, self.height() * 0.78)
+        return min(usable_width / span_x, usable_height / span_y)
+
+    def getSpread(self):
+        if self.points.size == 0:
+            return 1.0
+        return max(1.0, float(np.linalg.norm(self.points.max(axis=0) - self.points.min(axis=0))))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.auto_centre:
+            self.centreOnPoints(update=False)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.last_mouse_pos = event.position()
+
+    def mouseMoveEvent(self, event):
+        if self.last_mouse_pos is None:
+            return
+
+        delta = event.position() - self.last_mouse_pos
+        self.last_mouse_pos = event.position()
+        self.yaw += delta.x() * 0.5
+        self.pitch = min(89.0, max(-89.0, self.pitch + delta.y() * 0.5))
+        if self.auto_centre:
+            self.centreOnPoints(update=False)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self.last_mouse_pos = None
+
+    def wheelEvent(self, event):
+        self.zoom *= 1.0015 ** event.angleDelta().y()
+        self.zoom = min(25.0, max(0.05, self.zoom))
+        self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_R:
+            self.yaw = 0.0
+            self.pitch = -25.0
+            self.zoom = 1.0
+            self.auto_centre = True
+            self.centreOnPoints()
+            return
+        if event.key() == QtCore.Qt.Key_C:
+            self.auto_centre = True
+            self.centreOnPoints()
+            return
+        super().keyPressEvent(event)
+
+
+class BoundaryWindow(QtWidgets.QMainWindow):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlag(QtCore.Qt.Window, True)
+        self.view = BoundaryView(self)
+        self.setCentralWidget(self.view)
+        self.setWindowTitle("Recorded Boundaries - 0 points")
+
+    @property
+    def points(self):
+        return self.view.points
+
+    def clearPoints(self):
+        self.view.clearPoints()
+        self.setWindowTitle("Recorded Boundaries - 0 points")
+
+    def appendPoints(self, points):
+        self.view.appendPoints(points)
+        self.setWindowTitle(f"Recorded Boundaries - {self.view.points.shape[0]} points")
 
 
 class ImageView(QtWidgets.QGraphicsView):
