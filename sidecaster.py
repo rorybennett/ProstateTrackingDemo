@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 import ctypes
 import os
 import sys
@@ -8,17 +7,39 @@ from typing import Final
 
 APP_DIR = Path(__file__).resolve().parent
 LIB_DIR = APP_DIR / "libraries"
+PY_TAG = f"python{sys.version_info.major}{sys.version_info.minor}"
+PY_LIB_DIR = LIB_DIR / PY_TAG
 
-if str(LIB_DIR) not in sys.path:
-    sys.path.insert(0, str(LIB_DIR))
+LIB_SEARCH_DIRS = [PY_LIB_DIR, LIB_DIR]
+dll_dir_handles = []
+libcast_handle = None
+
+
+def find_lib(filename):
+    for lib_dir in LIB_SEARCH_DIRS:
+        path = lib_dir / filename
+        if path.exists():
+            return path
+    checked = ", ".join(str(lib_dir / filename) for lib_dir in LIB_SEARCH_DIRS)
+    raise FileNotFoundError(f"Could not find {filename}. Checked: {checked}")
+
+
+for lib_dir in LIB_SEARCH_DIRS:
+    if lib_dir.exists() and str(lib_dir) not in sys.path:
+        sys.path.insert(0, str(lib_dir))
 
 if sys.platform.startswith("win"):
-    os.add_dll_directory(str(LIB_DIR))
-    ctypes.WinDLL(str(LIB_DIR / "cast.dll"))
+    for lib_dir in LIB_SEARCH_DIRS:
+        if lib_dir.exists():
+            dll_dir_handles.append(os.add_dll_directory(str(lib_dir)))
+
+    ctypes.WinDLL(str(find_lib("cast.dll")))
 
 elif sys.platform.startswith("linux"):
-    libcast_handle = ctypes.CDLL(str(LIB_DIR / "libcast.so"), ctypes.RTLD_GLOBAL)._handle
-    pyclariuscast = ctypes.cdll.LoadLibrary(str(LIB_DIR / "pyclariuscast.so"))
+    libcast_handle = ctypes.CDLL(str(find_lib("libcast.so")), ctypes.RTLD_GLOBAL)._handle
+    ctypes.cdll.LoadLibrary(str(find_lib("pyclariuscast.so")))
+
+import pyclariuscast
 
 import pyclariuscast
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -286,7 +307,7 @@ class MainWidget(QtWidgets.QMainWindow):
 
     @Slot()
     def shutdown(self):
-        if sys.platform.startswith("linux"):
+        if sys.platform.startswith("linux") and libcast_handle is not None:
             ctypes.CDLL("libc.so.6").dlclose(libcast_handle)
 
         self.cast.destroy()
