@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import Final
 
 APP_DIR: Final = Path(__file__).resolve().parent
-LIB_DIR: Final = APP_DIR / "libraries"
+ASSET_DIR: Final = APP_DIR.parent
+
+LIB_DIR: Final = ASSET_DIR / "libraries"
 SRC_DIR: Final = APP_DIR / "src"
 
-YOLO_MODEL_PATH: Final = APP_DIR / "models" / "yolo_x_phantom_best.pt"
-UNET_MODEL_PATH: Final = APP_DIR / "models" / "unet_phantom_latest.pth"
+YOLO_MODEL_PATH: Final = ASSET_DIR / "models" / "yolo_x_phantom_best.pt"
+UNET_MODEL_PATH: Final = ASSET_DIR / "models" / "unet_phantom_latest.pth"
 UNET_TRAINING_PARAMETERS_PATH: Final = UNET_MODEL_PATH.with_name("training_parameters.txt")
 
 LEFT_ARROW_ICON_PATH: Final = SRC_DIR / "move_left.png"
@@ -846,11 +848,12 @@ class MainWidget(QtWidgets.QMainWindow):
         return labels == best_label
 
     def boundaryPixelsToLocalPoints(self, boundary_pixels, image_width: int, image_height: int, microns_per_pixel: float):
+        del image_height
         scale_mm = float(microns_per_pixel) / 1000.0
         xs = boundary_pixels[:, 0]
         ys = boundary_pixels[:, 1]
         x_mm = (xs - (image_width - 1) / 2.0) * scale_mm
-        y_mm = ((image_height - 1) / 2.0 - ys) * scale_mm
+        y_mm = ys * scale_mm
         z_mm = np.zeros_like(x_mm)
         return np.column_stack((x_mm, y_mm, z_mm)).astype(np.float32)
 
