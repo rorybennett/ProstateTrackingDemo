@@ -2,6 +2,7 @@
 
 import ctypes
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Final
@@ -10,6 +11,7 @@ APP_DIR = Path(__file__).resolve().parent
 LIB_DIR = APP_DIR / "libraries"
 YOLO_MODEL_PATH = APP_DIR / "models" / "yolo_x_phantom_best.pt"
 UNET_MODEL_PATH = APP_DIR / "models" / "unet_phantom_latest.pth"
+UNET_TRAINING_PARAMETERS_PATH = UNET_MODEL_PATH.with_name("training_parameters.txt")
 SRC_DIR = APP_DIR / "src"
 LEFT_ARROW_ICON_PATH = SRC_DIR / "move_left.png"
 RIGHT_ARROW_ICON_PATH = SRC_DIR / "move_right.png"
@@ -76,10 +78,10 @@ CMD_CFI_MODE: Final = 14
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
 UNET_INPUT_SIZE: Final = 600
-UNET_THRESHOLD: Final = 0.50
+UNET_LOGIT_THRESHOLD: Final = 0.50
+UNET_TRAIN_MEAN: Final = None
+UNET_TRAIN_STD: Final = None
 UNET_MASK_ALPHA: Final = 90
-UNET_VALID_PIXEL_THRESHOLD: Final = 3
-UNET_MIN_COMPONENT_AREA: Final = 100
 CENTRE_TOLERANCE_FRACTION: Final = 0.03
 GUIDANCE_ICON_SIZE_FRACTION: Final = 0.18
 GUIDANCE_ICON_MARGIN: Final = 20
@@ -173,6 +175,10 @@ class MainWidget(QtWidgets.QMainWindow):
         self.yolo_enabled = True
         self.unet_model = None
         self.unet_device = None
+        self.unet_input_size = UNET_INPUT_SIZE
+        self.unet_logit_threshold = UNET_LOGIT_THRESHOLD
+        self.unet_train_mean = UNET_TRAIN_MEAN
+        self.unet_train_std = UNET_TRAIN_STD
         self.unet_enabled = False
         self.guidance_icons = {}
         self.measurements_enabled = {key: False for key, _ in MEASUREMENT_BUTTONS.values()}
@@ -414,6 +420,61 @@ class MainWidget(QtWidgets.QMainWindow):
             return None
 
 
+
+    def loadUnetValidationConfig(self, checkpoint=None):
+        def as_float(value):
+            if value is None:
+                return None
+            if hasattr(value, "item"):
+                value = value.item()
+            if isinstance(value, (int, float)):
+                return float(value)
+            match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", str(value))
+            return float(match.group(0)) if match else None
+
+        configs = []
+        if isinstance(checkpoint, dict):
+            configs.extend(item for item in (checkpoint.get("training_parameters"), checkpoint.get("config"), checkpoint.get("args")) if isinstance(item, dict))
+            configs.append(checkpoint)
+
+        for config in configs:
+            for key in ("image_size", "input_size", "unet_input_size"):
+                value = as_float(config.get(key))
+                if value:
+                    self.unet_input_size = int(value)
+                    break
+            for key in ("train_mean", "training_mean", "mean"):
+                value = as_float(config.get(key))
+                if value is not None:
+                    self.unet_train_mean = value
+                    break
+            for key in ("train_std", "training_std", "std"):
+                value = as_float(config.get(key))
+                if value not in (None, 0):
+                    self.unet_train_std = value
+                    break
+
+        for path in (UNET_TRAINING_PARAMETERS_PATH, UNET_MODEL_PATH.with_suffix(".txt")):
+            if not path.exists():
+                continue
+            try:
+                for line in path.read_text(errors="ignore").splitlines():
+                    if ":" not in line:
+                        continue
+                    key, value_text = line.split(":", 1)
+                    key = key.strip().lower().replace(" ", "_")
+                    value = as_float(value_text)
+                    if value is None:
+                        continue
+                    if key == "image_size":
+                        self.unet_input_size = int(value)
+                    elif key in {"train_mean", "training_mean", "mean"}:
+                        self.unet_train_mean = value
+                    elif key in {"train_std", "training_std", "std"} and value != 0:
+                        self.unet_train_std = value
+            except Exception as exc:
+                self.statusBar().showMessage(f"Could not read UNet validation config: {exc}")
+
     def loadUnetModel(self):
         if torch is None or UNet is None:
             self.statusBar().showMessage(f"UNet unavailable: {UNET_IMPORT_ERROR}")
@@ -427,6 +488,7 @@ class MainWidget(QtWidgets.QMainWindow):
             self.unet_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model = UNet().to(self.unet_device)
             checkpoint = torch.load(str(UNET_MODEL_PATH), map_location=self.unet_device)
+            self.loadUnetValidationConfig(checkpoint)
             state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
             model.load_state_dict(state_dict)
@@ -564,45 +626,18 @@ class MainWidget(QtWidgets.QMainWindow):
 
     def prepareUnetTensor(self, original_img):
         gray = self.qImageToGrayArray(original_img).astype(np.float32) / 255.0
+        if self.unet_train_mean is not None and self.unet_train_std not in (None, 0):
+            gray = (gray - float(self.unet_train_mean)) / float(self.unet_train_std)
         tensor = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).to(self.unet_device)
-        return torch_nn_F.interpolate(tensor, size=(UNET_INPUT_SIZE, UNET_INPUT_SIZE), mode="bilinear", align_corners=False)
-
-    def getValidScanMask(self, original_img):
-        gray = self.qImageToGrayArray(original_img)
-        raw = gray > UNET_VALID_PIXEL_THRESHOLD
-        if not np.any(raw):
-            return np.ones_like(raw, dtype=bool)
-
-        valid = np.zeros_like(raw, dtype=bool)
-        for y in np.flatnonzero(raw.any(axis=1)):
-            xs = np.flatnonzero(raw[y])
-            valid[y, xs[0]:xs[-1] + 1] = True
-        return valid
-
-    def keepLargestMaskComponent(self, mask):
-        if mask is None or not np.any(mask):
-            return mask
-        try:
-            import cv2
-        except Exception:
-            return mask
-
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
-        if count <= 1:
-            return mask
-
-        areas = stats[1:, cv2.CC_STAT_AREA]
-        best = int(np.argmax(areas)) + 1
-        if int(areas[best - 1]) < UNET_MIN_COMPONENT_AREA:
-            return np.zeros_like(mask, dtype=bool)
-        return labels == best
+        return torch_nn_F.interpolate(tensor, size=(self.unet_input_size, self.unet_input_size), mode="bilinear", align_corners=False)
 
     def runUnetMask(self, original_img):
         tensor = self.prepareUnetTensor(original_img)
         with torch.no_grad():
             logits = self.unet_model(tensor)
-            logits = torch_nn_F.interpolate(logits, size=(original_img.height(), original_img.width()), mode="bilinear", align_corners=False)
-        return logits.squeeze().detach().cpu().numpy() > UNET_THRESHOLD
+            mask = logits > self.unet_logit_threshold
+            mask = torch_nn_F.interpolate(mask.float(), size=(original_img.height(), original_img.width()), mode="nearest")
+        return mask.squeeze().detach().cpu().numpy().astype(bool)
 
     def drawSegmentationMask(self, painter, mask):
         if mask is None or mask.size == 0:
@@ -612,19 +647,6 @@ class MainWidget(QtWidgets.QMainWindow):
         overlay[mask] = [128, 0, 128, UNET_MASK_ALPHA]
         overlay_img = QtGui.QImage(overlay.data, width, height, width * 4, QtGui.QImage.Format_RGBA8888).copy()
         painter.drawImage(0, 0, overlay_img)
-
-    def clipSegmentationGeometry(self, geometry, width, height):
-        if geometry is None:
-            return None
-
-        x_max = max(0, width - 1)
-        y_max = max(0, height - 1)
-
-        def clip_line(line):
-            x1, y1, x2, y2 = line
-            return (float(np.clip(x1, 0, x_max)), float(np.clip(y1, 0, y_max)), float(np.clip(x2, 0, x_max)), float(np.clip(y2, 0, y_max)))
-
-        return {key: clip_line(line) for key, line in geometry.items()}
 
     def getSegmentationGeometry(self, mask):
         ys, xs = np.nonzero(mask)
@@ -688,14 +710,13 @@ class MainWidget(QtWidgets.QMainWindow):
             return output_img
 
         painter = QtGui.QPainter(output_img)
-        painter.setClipRect(0, 0, output_img.width(), output_img.height())
         if not np.any(mask):
             self.drawNoDetectionIcon(painter, output_img)
             painter.end()
             return output_img
 
         self.drawSegmentationMask(painter, mask)
-        geometry = self.clipSegmentationGeometry(self.getSegmentationGeometry(mask), output_img.width(), output_img.height())
+        geometry = self.getSegmentationGeometry(mask)
         self.drawSegmentationMeasurements(painter, geometry, microns_per_pixel)
         painter.end()
         return output_img
