@@ -75,7 +75,7 @@ CMD_B_MODE: Final = 12
 CMD_CFI_MODE: Final = 14
 YOLO_CONF: Final = 0.25
 YOLO_IMGSZ: Final = 640
-UNET_INPUT_SIZE: Final = 256
+UNET_INPUT_SIZE: Final = 600
 UNET_THRESHOLD: Final = 0.50
 UNET_MASK_ALPHA: Final = 90
 UNET_VALID_PIXEL_THRESHOLD: Final = 3
@@ -601,13 +601,8 @@ class MainWidget(QtWidgets.QMainWindow):
         tensor = self.prepareUnetTensor(original_img)
         with torch.no_grad():
             logits = self.unet_model(tensor)
-            probs = torch.sigmoid(logits)
-            probs = torch_nn_F.interpolate(probs, size=(original_img.height(), original_img.width()), mode="bilinear", align_corners=False)
-        mask = probs.squeeze().detach().cpu().numpy() >= UNET_THRESHOLD
-        valid_mask = self.getValidScanMask(original_img)
-        if valid_mask.shape == mask.shape:
-            mask &= valid_mask
-        return self.keepLargestMaskComponent(mask)
+            logits = torch_nn_F.interpolate(logits, size=(original_img.height(), original_img.width()), mode="bilinear", align_corners=False)
+        return logits.squeeze().detach().cpu().numpy() > UNET_THRESHOLD
 
     def drawSegmentationMask(self, painter, mask):
         if mask is None or mask.size == 0:
